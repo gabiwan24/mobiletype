@@ -49,11 +49,15 @@
     ];
     World.add(world, walls);
 
-    // Font laden
+    // Font laden (TTF!)
     let font;
-    opentype.load('https://cdn.jsdelivr.net/npm/@fontsource/roboto/files/roboto-latin-400-normal.ttf', (err, f) => {
-      if (err) console.error('Font konnte nicht geladen werden:', err);
-      else font = f;
+    opentype.load('https://rawcdn.githack.com/google/fonts/main/apache/roboto/Roboto-Regular.ttf', (err, f) => {
+      if (err) {
+        console.error('Font konnte nicht geladen werden:', err);
+      } else {
+        font = f;
+        console.log("Font geladen ✔️");
+      }
     });
 
     // Hilfsfunktion: opentype-Pfad → Polygone
@@ -62,6 +66,98 @@
       let current = [];
 
       path.commands.forEach(cmd => {
+        if (cmd.type === 'M') {
+          if (current.length) {
+            polygons.push(current);
+            current = [];
+          }
+          current.push({ x: cmd.x, y: -cmd.y });
+        } else if (cmd.type === 'L' || cmd.type === 'C' || cmd.type === 'Q') {
+          if (cmd.x !== undefined && cmd.y !== undefined) {
+            current.push({ x: cmd.x, y: -cmd.y });
+          }
+        } else if (cmd.type === 'Z') {
+          if (current.length) {
+            polygons.push(current);
+            current = [];
+          }
+        }
+      });
+      if (current.length) polygons.push(current);
+
+      return polygons.map(poly => Vertices.simplify(poly, 1));
+    }
+
+    // Array für Buchstaben mit Render-Infos
+    const letters = [];
+
+    // Input → Buchstaben erzeugen
+    document.getElementById('input').addEventListener('input', e => {
+      if (!font) return;
+      const char = e.data;
+      if (!char) return;
+
+      const size = 100;
+      const path = font.getPath(char, 0, 0, size);
+      const polygons = pathToPolygons(path);
+
+      if (!polygons.length) return;
+
+      const body = Bodies.fromVertices(canvas.width/2, 150, polygons, {
+        friction: 0.8,
+        frictionStatic: 1,
+        restitution: 0.2,
+        render: { fillStyle: '#00000000' } // transparent, wir malen selbst
+      }, true);
+
+      if (body) {
+        World.add(world, body);
+        letters.push({ body, char, size });
+
+        // Entfernen nach 30s
+        setTimeout(() => {
+          World.remove(world, body);
+          const idx = letters.findIndex(l => l.body === body);
+          if (idx >= 0) letters.splice(idx, 1);
+        }, 30000);
+      }
+    });
+
+    // Nach jedem Render → Text über den Körper malen
+    Events.on(render, "afterRender", () => {
+      const ctx = render.context;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      letters.forEach(l => {
+        const pos = l.body.position;
+        const angle = l.body.angle;
+
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(angle);
+        ctx.font = `${l.size}px Roboto, Arial, sans-serif`;
+        ctx.fillStyle = "#222";
+        ctx.fillText(l.char, 0, 0);
+        ctx.rotate(-angle);
+        ctx.translate(-pos.x, -pos.y);
+      });
+
+      ctx.restore();
+    });
+
+    // Gyroskop → Gravitation
+    if (window.DeviceOrientationEvent) {
+      window.addEventListener("deviceorientation", (event) => {
+        const tiltX = event.gamma;
+        const tiltY = event.beta;
+        engine.world.gravity.x = tiltX / 20;
+        engine.world.gravity.y = tiltY / 20;
+      });
+    }
+  </script>
+</body>
+</html>
         if (cmd.type === 'M') {
           if (current.length) {
             polygons.push(current);
