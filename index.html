@@ -5,18 +5,23 @@
   <title>Gyro Typo Playground</title>
   <style>
     body, html { margin:0; padding:0; overflow:hidden; }
-    canvas { display:block; }
-    #input { position: absolute; top: 10px; left: 10px; }
+    canvas { display:block; background: #fafafa; }
+    #input { position: absolute; top: 10px; left: 10px; z-index: 10; }
   </style>
 </head>
 <body>
   <input id="input" type="text" placeholder="Tippe hier..." />
-
   <canvas id="world"></canvas>
 
+  <!-- poly-decomp -->
+  <script src="https://cdn.jsdelivr.net/npm/poly-decomp@0.3.0/build/decomp.min.js"></script>
+  <!-- Matter.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <!-- opentype.js -->
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
+
   <script>
-    const { Engine, Render, Runner, World, Bodies, Body, Composite } = Matter;
+    const { Engine, Render, Runner, World, Bodies, Vertices, Events } = Matter;
 
     const engine = Engine.create();
     const world = engine.world;
@@ -37,57 +42,113 @@
     // Wände
     const thickness = 50;
     const walls = [
-      Bodies.rectangle(canvas.width/2, canvas.height+thickness/2, canvas.width, thickness, { isStatic: true }), // Boden
-      Bodies.rectangle(canvas.width/2, -thickness/2, canvas.width, thickness, { isStatic: true }), // Decke
-      Bodies.rectangle(-thickness/2, canvas.height/2, thickness, canvas.height, { isStatic: true }), // links
-      Bodies.rectangle(canvas.width+thickness/2, canvas.height/2, thickness, canvas.height, { isStatic: true }) // rechts
+      Bodies.rectangle(canvas.width/2, canvas.height+thickness/2, canvas.width, thickness, { isStatic: true }),
+      Bodies.rectangle(canvas.width/2, -thickness/2, canvas.width, thickness, { isStatic: true }),
+      Bodies.rectangle(-thickness/2, canvas.height/2, thickness, canvas.height, { isStatic: true }),
+      Bodies.rectangle(canvas.width+thickness/2, canvas.height/2, thickness, canvas.height, { isStatic: true })
     ];
     World.add(world, walls);
 
-    // Buchstaben hinzufügen
-    const input = document.getElementById('input');
-    input.addEventListener('input', e => {
+    // Font laden
+    let font;
+    opentype.load('https://cdn.jsdelivr.net/npm/@fontsource/roboto/files/roboto-latin-400-normal.ttf', (err, f) => {
+      if (err) console.error('Font konnte nicht geladen werden:', err);
+      else font = f;
+    });
+
+    // Hilfsfunktion: opentype-Pfad → Polygone
+    function pathToPolygons(path) {
+      const polygons = [];
+      let current = [];
+
+      path.commands.forEach(cmd => {
+        if (cmd.type === 'M') {
+          if (current.length) {
+            polygons.push(current);
+            current = [];
+          }
+          current.push({ x: cmd.x, y: -cmd.y });
+        } else if (cmd.type === 'L' || cmd.type === 'C' || cmd.type === 'Q') {
+          if (cmd.x !== undefined && cmd.y !== undefined) {
+            current.push({ x: cmd.x, y: -cmd.y });
+          }
+        } else if (cmd.type === 'Z') {
+          if (current.length) {
+            polygons.push(current);
+            current = [];
+          }
+        }
+      });
+      if (current.length) polygons.push(current);
+
+      return polygons.map(poly => Vertices.simplify(poly, 1));
+    }
+
+    // Array für unsere Buchstaben (mit Info für Render)
+    const letters = [];
+
+    // Input → Buchstaben erzeugen
+    document.getElementById('input').addEventListener('input', e => {
+      if (!font) return;
       const char = e.data;
       if (!char) return;
 
-      const size = 50;
+      const size = 100;
+      const path = font.getPath(char, 0, 0, size);
+      const polygons = pathToPolygons(path);
 
-      // Einfacher: Rechteckkörper + Text im Renderer sichtbar machen
-      const body = Bodies.rectangle(canvas.width/2, 100, size, size, {
+      if (!polygons.length) return;
+
+      const body = Bodies.fromVertices(canvas.width/2, 150, polygons, {
         friction: 0.8,
         frictionStatic: 1,
         restitution: 0.2,
-        render: {
-          fillStyle: '#222',
-          text: { content: char, size: size, color: "white" }
-        }
+        render: { fillStyle: '#00000000' } // transparent, wir malen selbst
+      }, true);
+
+      if (body) {
+        World.add(world, body);
+
+        // merken, welches Zeichen zu welchem Body gehört
+        letters.push({ body, char, size });
+
+        // Entfernen nach 30s
+        setTimeout(() => {
+          World.remove(world, body);
+          const idx = letters.findIndex(l => l.body === body);
+          if (idx >= 0) letters.splice(idx, 1);
+        }, 30000);
+      }
+    });
+
+    // Nach jedem Render → Text über den Körper malen
+    Events.on(render, "afterRender", () => {
+      const ctx = render.context;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      letters.forEach(l => {
+        const pos = l.body.position;
+        const angle = l.body.angle;
+
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(angle);
+        ctx.font = `${l.size}px Roboto, Arial, sans-serif`;
+        ctx.fillStyle = "#222";
+        ctx.fillText(l.char, 0, 0);
+        ctx.rotate(-angle);
+        ctx.translate(-pos.x, -pos.y);
       });
 
-      // Zeichne Text auf Body (HACK via plugin-like override)
-      const oldDraw = render.context.drawImage;
-      render.context.drawImage = function() {
-        oldDraw.apply(this, arguments);
-        render.context.font = size + "px Arial";
-        render.context.fillStyle = "#222";
-        render.context.textAlign = "center";
-        render.context.textBaseline = "middle";
-        render.context.fillText(char, body.position.x, body.position.y);
-      };
-
-      Body.setMass(body, size * 0.5);
-      World.add(world, body);
-
-      // Entferne nach 30s
-      setTimeout(() => {
-        World.remove(world, body);
-      }, 30000);
+      ctx.restore();
     });
 
     // Gyroskop → Gravitation
     if (window.DeviceOrientationEvent) {
       window.addEventListener("deviceorientation", (event) => {
-        const tiltX = event.gamma;  // links-rechts
-        const tiltY = event.beta;   // vor/zurück
+        const tiltX = event.gamma;
+        const tiltY = event.beta;
         engine.world.gravity.x = tiltX / 20;
         engine.world.gravity.y = tiltY / 20;
       });
