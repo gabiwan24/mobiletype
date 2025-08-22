@@ -8,6 +8,7 @@
   <style>
     html, body { margin:0; padding:0; height:100%; background:#fafafa; }
     canvas { display:block; touch-action:none; }
+
     @font-face {
       font-family: "MontserratVar";
       src: url("fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
@@ -30,16 +31,15 @@
       Common, Events, Vertices, Query
     } = Matter;
 
-    // ---- Globals & constants (declare before use) ----
+    // ---- Globals ----
     const WALL_THICK = 60;
     let walls = null;
-    const MIC_R = 120;   // Radius (Ø 240)
+    const MIC_R = 120;   // Ø 240
     let micBody = null;
 
-    // Link poly-decomp
     if (window.decomp && Common && Common.setDecomp) Common.setDecomp(window.decomp);
 
-    // ---- Engine / Render (CSS px 1:1) ----
+    // ---- Engine / Render ----
     const canvas = document.getElementById('world');
     const engine = Engine.create({ enableSleeping: true });
     engine.world.gravity.y = 1;
@@ -66,7 +66,7 @@
     Runner.run(Runner.create(), engine);
     resize();
 
-    // ---- Walls (invisible boundaries) ----
+    // ---- Walls ----
     function buildWalls() {
       if (walls) World.remove(engine.world, walls);
       const w = render.options.width, h = render.options.height, t = WALL_THICK;
@@ -81,7 +81,7 @@
       World.add(engine.world, walls);
     }
 
-    // ---- Mic button (black circle, collider) ----
+    // ---- Mic button ----
     function placeMic() {
       if (micBody) World.remove(engine.world, micBody);
       const w = render.options.width, h = render.options.height;
@@ -92,14 +92,16 @@
       World.add(engine.world, micBody);
     }
 
-    // ---- Font loading ----
-    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf"; // <- set your path
-    let fontOT = null, canvasFontReady = false;
-    function loadOTFont(url){ return new Promise((res,rej)=> opentype.load(url, (e,f)=> e?rej(e):res(f))); }
-    (async()=>{ try{ fontOT = await loadOTFont(LOCAL_FONT_URL); } catch(e){ console.error("Font load fail:", e);} })();
+    // ---- Font ----
+    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf"; // anpassen
+    let fontOT = null;
+    let canvasFontReady = false; // wir zeichnen trotzdem (Fallback), setzen es später true
+
+    function loadOTFont(url){ return new Promise((res,rej)=>opentype.load(url,(e,f)=>e?rej(e):res(f))); }
+    (async()=>{ try{ fontOT = await loadOTFont(LOCAL_FONT_URL); } catch(e){ console.error("Font load fail:", e); } })();
     (async()=>{ try{ await Promise.race([document.fonts.load('700 120px "MontserratVar"'), new Promise(r=>setTimeout(r,1200))]); }catch{} try{ await document.fonts.ready; }catch{} canvasFontReady = true; })();
 
-    // ---- Path sampling + simplify (for physics shapes) ----
+    // ---- Path sampling + simplify ----
     function quadAt(p0,p1,p2,t){ return { x:(1-t)*(1-t)*p0.x+2*(1-t)*t*p1.x+t*t*p2.x, y:(1-t)*(1-t)*p0.y+2*(1-t)*t*p1.y+t*t*p2.y }; }
     function cubicAt(p0,p1,p2,p3,t){ const mt=1-t; return { x: mt*mt*mt*p0.x+3*mt*mt*t*p1.x+3*mt*t*t*p2.x+t*t*t*p3.x, y: mt*mt*mt*p0.y+3*mt*mt*t*p1.y+3*mt*t*t*p2.y+t*t*t*p3.y }; }
     function pointLineDistance(p,a,b){ const A=p.x-a.x,B=p.y-a.y,C=b.x-a.x,D=b.y-a.y; const dot=A*C+B*D,len=C*C+D*D||1; let t=dot/len; t=Math.max(0,Math.min(1,t)); const x=a.x+t*C,y=a.y+t*D; return Math.hypot(p.x-x,p.y-y); }
@@ -117,12 +119,12 @@
       const EPS=0.8; return polys.map(poly=> poly.length>3 ? rdp(poly,EPS):poly);
     }
 
-    // ---- Audio loudness → weight (per press average) ----
+    // ---- Loudness → weight ----
     let isRecording = false;
-    let currentLine = "";              // line shown while recording
-    let currentWght = 400;             // live wght 100..800
-    let peakRMS = 0;                   // peak this press
-    let sumRMS = 0, samplesRMS = 0;    // average this press
+    let currentLine = "";           // live line shown
+    let currentWght = 400;          // 100..800 (live)
+    let peakRMS = 0;
+    let sumRMS = 0, samplesRMS = 0;
     let audioCtx=null, analyser=null, mediaStream=null;
 
     function startAudioMeter() {
@@ -158,11 +160,10 @@
       return Math.round(100 + (800-100) * v);
     }
 
-    // ---- SpeechRecognition (press & hold) ----
+    // ---- SpeechRecognition (press & hold) + gyro ----
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
 
-    // Gyro init once (ask permission on first press for iOS)
     let gyroInited = false;
     function initGyroOnce() {
       if (gyroInited) return;
@@ -170,9 +171,7 @@
       if (typeof DeviceOrientationEvent !== "undefined" &&
           typeof DeviceOrientationEvent.requestPermission === "function") {
         DeviceOrientationEvent.requestPermission().catch(()=>{}).finally(attachGyro);
-      } else {
-        attachGyro();
-      }
+      } else attachGyro();
     }
     function attachGyro() {
       window.addEventListener("deviceorientation", (ev) => {
@@ -204,12 +203,11 @@
         }
         if (finalText.trim()) currentLine = finalText.trim();
       };
-      recognition.onend = () => { isRecording = false; finalizePress(); };
-      recognition.onerror = (ev) => { console.error(ev); isRecording = false; finalizePress(); };
+      recognition.onend   = () => { isRecording = false; finalizePress(); };
+      recognition.onerror = () => { isRecording = false; finalizePress(); };
 
       startAudioMeter().then(()=>{
-        try { recognition.start(); isRecording = true; }
-        catch(e){ console.error(e); isRecording=false; }
+        try { recognition.start(); isRecording = true; } catch(e){ console.error(e); isRecording=false; }
       }).catch(err=> console.error(err));
     }
     function stopSpeech() {
@@ -217,7 +215,7 @@
       stopAudioMeter();
     }
 
-    // ---- Spawn falling word → independent letters (no joints) ----
+    // ---- Spawn falling word (independent letters) ----
     const LETTER_TTL_MS = 30000;
     const letterGroups = [];
 
@@ -246,15 +244,14 @@
       const letters = [];
       let penX = -width/2;
 
-      // small letter spacing to avoid initial overlaps (no clumping)
-      const EXTRA_SPACING = 2;
+      const EXTRA_SPACING = 2; // kleiner zusätzlicher Abstand verhindert Anfangs-Überlappungen
+      const chars = Array.from(word);
 
       for (let i=0;i<glyphs.length;i++){
         const g = glyphs[i];
         const path = g.getPath(0, 0, size);
         const polys = pathToPolygons(path);
 
-        // advance incl. kerning + tiny extra spacing
         const scale = size / fontOT.unitsPerEm;
         const adv = (g.advanceWidth * scale)
                   + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0)
@@ -263,15 +260,15 @@
         if (polys.length){
           const shifted = polys.map(poly => poly.map(p => ({ x: p.x + penX, y: p.y })));
           const body = Bodies.fromVertices(spawnX, spawnY, shifted, {
-            friction: 0.5,          // moderat → weniger „kleben“
-            frictionStatic: 0.6,    // nicht zu hoch (verhindert Klumpen)
-            frictionAir: 0.03,      // beruhigt
-            restitution: 0.04,      // kaum Bounciness
+            friction: 0.2,          // ↓ Reibung -> weniger Kleben
+            frictionStatic: 0.05,   // ↓ statische Reibung
+            frictionAir: 0.03,      // leicht dämpfen
+            restitution: 0.18,      // etwas Bounciness -> stößt ab
             render: { visible: false },
             sleepThreshold: 40
           }, true);
           if (body){
-            // mass ~ area * randomness * loudness
+            // Masse
             try {
               const flat = shifted.flat();
               const hull = Vertices.hull(flat);
@@ -281,12 +278,12 @@
               const mass = Math.max(1, (area/1600) * loudFactor * randFactor);
               Body.setMass(body, mass);
             } catch {}
-            // diverse starting spin
             Body.setAngularVelocity(body, (Math.random()*2-1) * 0.35);
-            // tiny position jitter to avoid perfect alignment
+            // minimales Jitter, um perfekte Kantenkontakte zu vermeiden
             Body.setPosition(body, { x: body.position.x, y: body.position.y + (Math.random()-0.5)*0.5 });
-            body.label = "char:" + (word[i] || " ");
-            letters.push({ body, char: (word[i] || " "), size, wght });
+            body.label = "char:" + (chars[i] || " ");
+            body.plugin = { letter: true };
+            letters.push({ body, char: (chars[i] || " "), size, wght });
             Composite.add(engine.world, body);
           }
         }
@@ -305,14 +302,32 @@
       const line = (currentLine || "").trim();
       currentLine = "";
       const size = 100;
-      const wght = averagedWght();   // Wort-Gewicht = Durchschnittslautstärke des Press
+      const wght = averagedWght();   // Wortgewicht = Durchschnittslautstärke
       const peak = peakRMS;
       stopAudioMeter();
       if (!line) return;
-
-      // mehrere Wörter im gleichen Press → alle spawnen, je mit dem selben avg-wght
       line.split(/\s+/).forEach(w => spawnFallingWord(w, size, wght, peak));
     }
+
+    // ---- Repulsion on contact (gegen Klumpen) ----
+    // Bei aktiver Kollision stoßen wir Buchstaben leicht auseinander.
+    Events.on(engine, "collisionActive", (evt) => {
+      const kBase = 0.0008; // Stärke der Abstoßkraft
+      for (const pair of evt.pairs) {
+        const A = pair.bodyA, B = pair.bodyB;
+        // nur zwischen dynamischen Buchstaben
+        if (!(A.plugin && A.plugin.letter) || !(B.plugin && B.plugin.letter)) continue;
+
+        // Normal zeigt von B -> A (Matter), nutzen wir zum Auseinanderdrücken
+        const n = pair.collision.normal;
+        // pair.separation ist in Matter < 0 bei Überlappung; wir nehmen die Tiefe
+        const depth = Math.max(0, -pair.separation || 0);
+        const k = kBase * (1 + depth);
+
+        Body.applyForce(A, A.position, { x:  n.x * k, y:  n.y * k });
+        Body.applyForce(B, B.position, { x: -n.x * k, y: -n.y * k });
+      }
+    });
 
     // ---- Rendering ----
     Events.on(render, "afterRender", () => {
@@ -321,12 +336,14 @@
       ctx.textAlign = "center";
       ctx.textBaseline = "alphabetic";
 
-      // Live line (as a single centered line)
-      if (canvasFontReady && (isRecording || currentLine)) {
+      // Live-Zeile (zeige IMMER: auch wenn Font noch lädt -> Fallback-Font verfügbar)
+      if (isRecording || currentLine) {
         const w = render.options.width, h = render.options.height;
         const inset = WALL_THICK + 8;
         const fontSize = 120;
-        ctx.font = `${currentWght} ${fontSize}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+        // MontserratVar wenn ready, sonst System-Font; dadurch sieht man auf Mobile sofort Text
+        const fam = canvasFontReady ? '"MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial' : 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.font = `${currentWght} ${fontSize}px ${fam}`;
         const text = currentLine || "";
         const tw = ctx.measureText(text).width;
         const x = Math.max(inset + tw/2, Math.min(w - inset - tw/2, w/2));
@@ -336,8 +353,9 @@
         ctx.fillText(text, x, y);
       }
 
-      // Falling letters
-      if (canvasFontReady) {
+      // Gefallene Buchstaben
+      {
+        const famFall = canvasFontReady ? '"MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial' : 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
         ctx.shadowColor = "rgba(0,0,0,0.20)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
         for (const group of letterGroups) {
           for (const L of group.letters) {
@@ -346,7 +364,7 @@
             ctx.save();
             ctx.translate(x, y);
             ctx.rotate(body.angle);
-            ctx.font = `${wght} ${size}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+            ctx.font = `${wght} ${size}px ${famFall}`;
             ctx.fillStyle = "#222";
             ctx.fillText(char, 0, size*0.35);
             ctx.restore();
@@ -354,7 +372,7 @@
         }
       }
 
-      // Mic button (pure black circle, no icon)
+      // Mic-Button (schwarzer Kreis, ohne Icon)
       if (micBody) {
         const { x, y } = micBody.position;
         ctx.save();
@@ -366,7 +384,7 @@
       ctx.restore();
     });
 
-    // ---- Pointer: press & hold on circle ----
+    // ---- Pointer: press & hold ----
     function hitMic(evt) {
       if (!micBody) return false;
       const rect = canvas.getBoundingClientRect();
@@ -386,6 +404,7 @@
     });
     canvas.addEventListener('pointercancel', ()=> { if (isRecording) stopSpeech(); });
     window.addEventListener('blur', ()=> { if (isRecording) stopSpeech(); });
+
   </script>
 </body>
 </html>
