@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Gyro Typo Playground</title>
+  <style>
+    body, html { margin:0; padding:0; overflow:hidden; }
+    canvas { display:block; }
+    #input { position: absolute; top: 10px; left: 10px; }
+  </style>
+</head>
+<body>
+  <input id="input" type="text" placeholder="Tippe hier..." />
+
+  <canvas id="world"></canvas>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <script>
+    const { Engine, Render, Runner, World, Bodies, Body } = Matter;
+
+    const engine = Engine.create();
+    const world = engine.world;
+
+    const canvas = document.getElementById('world');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const render = Render.create({
+      canvas: canvas,
+      engine: engine,
+      options: { width: canvas.width, height: canvas.height, wireframes: false, background: '#fafafa' }
+    });
+
+    Render.run(render);
+    Runner.run(Runner.create(), engine);
+
+    // Boden
+    const ground = Bodies.rectangle(canvas.width/2, canvas.height+20, canvas.width, 40, { isStatic: true });
+    World.add(world, ground);
+
+    // Tipp-Event → füge Buchstaben hinzu
+    const input = document.getElementById('input');
+    input.addEventListener('input', e => {
+      const char = e.data;
+      if (!char) return;
+      const size = 30 + Math.random()*30; // "Flächenvolumen" vereinfachen
+      const mass = size * 0.1;
+      const body = Bodies.rectangle(Math.random()*canvas.width, 0, size, size, {
+        render: { fillStyle: '#333' }
+      });
+      Body.setMass(body, mass);
+      World.add(world, body);
+    });
+
+    // Gyroskop → beeinflusst Gravitation
+    if (window.DeviceOrientationEvent) {
+      window.addEventListener("deviceorientation", (event) => {
+        const tiltX = event.gamma;  // links-rechts
+        const tiltY = event.beta;   // vor/zurück
+        // Skaliere Neigungswinkel zu "Gravitation"
+        engine.world.gravity.x = tiltX / 30;
+        engine.world.gravity.y = tiltY / 30;
+      });
+    }
+  </script>
+</body>
+</html>
