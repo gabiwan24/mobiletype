@@ -14,15 +14,14 @@
     }
     #input { flex:1; font-size:16px; padding:10px 12px; border-radius:12px; border:1px solid #ddd; }
     #gyroBtn { padding:10px 12px; border-radius:12px; border:1px solid #ddd; background:#fff; }
-    /* Canvas-Rendering-Font (für sichtbaren Text) – lokal aus deinem Repo */
+
     @font-face {
       font-family: "MontserratVar";
       src: url("fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
-      font-weight: 100 900; /* Variable-Achse wght */
+      font-weight: 100 900;
       font-style: normal;
       font-display: swap;
     }
-    /* Fallback – nur fürs normale Canvas-Text-Rendering, falls @font-face blockt */
     .use-montserrat { font-family:"MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
   </style>
 </head>
@@ -34,7 +33,7 @@
     <button id="gyroBtn" type="button">Gyro aktivieren</button>
   </div>
 
-  <!-- poly-decomp muss vor Matter fromVertices nutzbar sein -->
+  <!-- poly-decomp -->
   <script src="https://cdn.jsdelivr.net/npm/poly-decomp@0.3.0/build/decomp.min.js"></script>
   <!-- Matter.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
@@ -42,12 +41,17 @@
   <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
 
   <script>
-    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body } = Matter;
+    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body, Common } = Matter;
+
+    // poly-decomp an Matter binden
+    if (window.decomp && Common && Common.setDecomp) {
+      Common.setDecomp(window.decomp);
+    }
 
     // ----- Canvas + Engine -----
     const canvas = document.getElementById("world");
     const engine = Engine.create();
-    engine.world.gravity.y = 1; // Standard, wird durch Gyro überschrieben
+    engine.world.gravity.y = 1;
     const render = Render.create({
       canvas,
       engine,
@@ -63,33 +67,29 @@
     Runner.run(Runner.create(), engine);
 
     // Resize
-    function resize() {
-      render.canvas.width = window.innerWidth;
-      render.canvas.height = window.innerHeight;
-      render.options.width = window.innerWidth;
-      render.options.height = window.innerHeight;
-      // Wände anpassen: hier einfach neu erstellen (simpel)
-      World.remove(engine.world, walls);
-      makeWalls();
-    }
-    window.addEventListener("resize", resize);
-
-    // ----- Wände -----
     let walls = null;
     function makeWalls() {
       const w = render.options.width;
       const h = render.options.height;
       const t = 50;
+      if (walls) World.remove(engine.world, walls);
       walls = Matter.Composite.create();
-      const wallBodies = [
-        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }), // Boden
-        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),     // Decke
-        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),     // links
-        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })   // rechts
-      ];
-      Matter.Composite.add(walls, wallBodies);
+      Matter.Composite.add(walls, [
+        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }),
+        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),
+        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),
+        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })
+      ]);
       World.add(engine.world, walls);
     }
+    function resize() {
+      render.canvas.width = window.innerWidth;
+      render.canvas.height = window.innerHeight;
+      render.options.width = window.innerWidth;
+      render.options.height = window.innerHeight;
+      makeWalls();
+    }
+    window.addEventListener("resize", resize);
     makeWalls();
 
     // ----- Font laden (lokal) mit Fallback -----
@@ -97,31 +97,19 @@
     const FALLBACK_TTF = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/montserrat/Montserrat-Regular.ttf";
 
     let font = null;
-    function loadFont(url, onDone) {
-      opentype.load(url, (err, f) => {
-        onDone(err, f);
-      });
-    }
+    function loadFont(url, cb){ opentype.load(url, (err, f) => cb(err, f)); }
     loadFont(LOCAL_FONT_URL, (err, f) => {
-      if (!err && f) {
-        font = f;
-        console.log("Font (lokal) geladen ✔️");
-      } else {
-        console.warn("Lokaler Font konnte nicht geladen werden, versuche Fallback:", err);
-        loadFont(FALLBACK_TTF, (err2, f2) => {
-          if (!err2 && f2) {
-            font = f2;
-            console.log("Fallback-Font geladen ✔️");
-          } else {
-            console.error("Kein Font verfügbar:", err2);
-          }
+      if (!err && f) { font = f; console.log("Font (lokal) geladen ✔️"); }
+      else {
+        console.warn("Lokaler Font-Load fail, Fallback:", err);
+        loadFont(FALLBACK_TTF, (e2, f2) => {
+          if (!e2 && f2) { font = f2; console.log("Fallback-Font geladen ✔️"); }
+          else console.error("Kein Font verfügbar:", e2);
         });
       }
     });
 
-    // ----- Pfad → Polygone (mit Kurven-Approximation) -----
-    // Wir sampeln Quadratic/Cubic-Bézierkurven, damit die Kontur schön der Schrift folgt.
-    function lerp(a,b,t){ return a + (b-a)*t; }
+    // ----- Hilfen: Kurven-Sampling + RDP-Simplify -----
     function quadAt(p0, p1, p2, t) {
       const x = (1-t)*(1-t)*p0.x + 2*(1-t)*t*p1.x + t*t*p2.x;
       const y = (1-t)*(1-t)*p0.y + 2*(1-t)*t*p1.y + t*t*p2.y;
@@ -133,12 +121,42 @@
       const y = mt*mt*mt*p0.y + 3*mt*mt*t*p1.y + 3*mt*t*t*p2.y + t*t*t*p3.y;
       return {x,y};
     }
+    // Ramer–Douglas–Peucker Simplify
+    function rdp(points, epsilon) {
+      if (points.length < 3) return points.slice();
+      const dmax = (() => {
+        const [p0, pn] = [points[0], points[points.length-1]];
+        let idx = -1, maxDist = -1;
+        for (let i=1; i<points.length-1; i++) {
+          const d = pointLineDistance(points[i], p0, pn);
+          if (d > maxDist) { idx = i; maxDist = d; }
+        }
+        return {idx, maxDist};
+      })();
+      if (dmax.maxDist > epsilon) {
+        const rec1 = rdp(points.slice(0, dmax.idx+1), epsilon);
+        const rec2 = rdp(points.slice(dmax.idx), epsilon);
+        return rec1.slice(0, -1).concat(rec2);
+      } else {
+        return [points[0], points[points.length-1]];
+      }
+    }
+    function pointLineDistance(p, a, b) {
+      const A = p.x - a.x, B = p.y - a.y, C = b.x - a.x, D = b.y - a.y;
+      const dot = A*C + B*D;
+      const lenSq = C*C + D*D || 1;
+      let t = dot / lenSq; t = Math.max(0, Math.min(1, t));
+      const x = a.x + t*C, y = a.y + t*D;
+      const dx = p.x - x, dy = p.y - y;
+      return Math.hypot(dx, dy);
+    }
 
+    // opentype-Pfad → Polygone (gesampelt + vereinfacht)
     function pathToPolygons(path) {
       const polys = [];
       let cur = [];
       let last = {x:0,y:0};
-      const STEP_Q = 12; // mehr = glatter
+      const STEP_Q = 12; // höher = glatter
       const STEP_C = 18;
 
       path.commands.forEach(cmd => {
@@ -173,8 +191,9 @@
       });
       if (cur.length) polys.push(cur);
 
-      // Vereinfachen (Pixel-Toleranz 0.8), danach zurück
-      return polys.map(poly => Vertices.simplify(poly, 0.8));
+      // Vereinfachen per RDP (Toleranz in Pixeln)
+      const EPS = 0.8;
+      return polys.map(poly => (poly.length > 3 ? rdp(poly, EPS) : poly));
     }
 
     // ----- Buchstaben-Verwaltung -----
@@ -184,13 +203,11 @@
     function spawnLetter(char) {
       if (!font) return;
 
-      const size = 100; // sichtbare Schriftgröße UND für Kontur
-      // opentype: Pfad für den Buchstaben
+      const size = 100;
       const path = font.getPath(char, 0, 0, size);
       const polygons = pathToPolygons(path);
       if (!polygons.length) return;
 
-      // Physik-Body aus Polygonen
       const body = Bodies.fromVertices(
         render.options.width / 2,
         Math.max(120, window.innerHeight * 0.2),
@@ -200,17 +217,17 @@
           frictionStatic: 1.0,
           frictionAir: 0.01,
           restitution: 0.18,
-          chamfer: 0,
-          render: { fillStyle: "#00000000" } // wir zeichnen Text selbst
+          render: { fillStyle: "#00000000" }
         },
         true
       );
-
       if (!body) return;
 
-      // Masse ≈ Fläche des konvexen Hull (Annäherung)
+      // Masse ≈ Fläche (grobe Annäherung)
       try {
-        const area = Matter.Vertices.area(Matter.Vertices.hull(polygons.flat()));
+        const flat = polygons.flat();
+        const hull = Vertices.hull(flat);
+        const area = Math.abs(Vertices.area(hull));
         if (area && isFinite(area)) Body.setMass(body, Math.max(1, area / 1500));
       } catch {}
 
@@ -219,7 +236,6 @@
       const rec = { body, char, size, born: performance.now() };
       letters.push(rec);
 
-      // Auto-Remove
       setTimeout(() => {
         World.remove(engine.world, body);
         const idx = letters.indexOf(rec);
@@ -227,48 +243,42 @@
       }, LETTER_TTL_MS);
     }
 
-    // ----- Eingabe (einzelne Buchstaben) -----
+    // ----- Eingabe -----
     const input = document.getElementById("input");
     input.addEventListener("beforeinput", (e) => {
-      // Nur einzelne Zeichen spawnen, Backspace & Co. ignorieren
       if (e.inputType === "insertText" && e.data) {
         spawnLetter(e.data[0]);
       }
     });
-    // Optional: Enter drückt ein Leerzeichen-Spawn
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); spawnLetter("•"); }
     });
 
-    // ----- Rendering: Text über die Physik zeichnen -----
+    // ----- Rendering (sichtbare Schrift) -----
     Events.on(render, "afterRender", () => {
       const ctx = render.context;
       ctx.save();
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      // leichte Schattierung für bessere Lesbarkeit
       ctx.shadowColor = "rgba(0,0,0,0.25)";
       ctx.shadowBlur = 6;
       ctx.shadowOffsetY = 1;
 
-      letters.forEach(({ body, char, size }) => {
+      for (const { body, char, size } of letters) {
         const { x, y } = body.position;
         ctx.translate(x, y);
         ctx.rotate(body.angle);
-        // Gewicht "600" visuell – Canvas-Font-String: "bold 100px 'MontserratVar'"
         ctx.font = `600 ${size}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
         ctx.fillStyle = "#222";
         ctx.fillText(char, 0, 0);
         ctx.rotate(-body.angle);
         ctx.translate(-x, -y);
-      });
-
+      }
       ctx.restore();
     });
 
-    // ----- Gyroskop: Permission-Button für iOS + Live-Gravity -----
+    // ----- Gyro -----
     const gyroBtn = document.getElementById("gyroBtn");
-
     async function enableGyro() {
       try {
         if (typeof DeviceOrientationEvent !== "undefined" &&
@@ -277,8 +287,7 @@
           if (res !== "granted") { alert("Bitte Bewegungszugriff erlauben."); return; }
         }
         window.addEventListener("deviceorientation", (ev) => {
-          // gamma: links/rechts, beta: vor/zurück
-          const gx = (ev.gamma || 0) / 18; // stärkere Reaktion
+          const gx = (ev.gamma || 0) / 18;
           const gy = (ev.beta  || 0) / 18;
           engine.world.gravity.x = Math.max(-2, Math.min(2, gx));
           engine.world.gravity.y = Math.max(-2, Math.min(2, gy));
@@ -292,7 +301,7 @@
     }
     gyroBtn.addEventListener("click", enableGyro);
 
-    // Erstes Resize korrekt setzen
+    // initial
     resize();
   </script>
 </body>
