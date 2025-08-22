@@ -6,11 +6,14 @@
   <title>Gyro Typo Playground</title>
   <style>
     html, body { margin:0; padding:0; height:100%; background:#fafafa; }
-    canvas { display:block; width:100vw; height:100vh; }
+    /* Wichtig: KEINE feste CSS-Größe am Canvas (wir setzen echte Pixelmaße per JS) */
+    canvas { display:block; }
     #ui {
-      position: fixed; inset:auto 0 0 0; display:flex; gap:8px;
-      padding:10px; background:linear-gradient(to top, rgba(250,250,250,0.95), rgba(250,250,250,0.6));
+      position: fixed; left:0; right:0; bottom:0;
+      display:flex; gap:8px; padding:10px;
+      background:linear-gradient(to top, rgba(250,250,250,0.95), rgba(250,250,250,0.6));
       align-items:center; backdrop-filter:saturate(1.1) blur(6px);
+      z-index:10;
     }
     #input { flex:1; font-size:16px; padding:10px 12px; border-radius:12px; border:1px solid #ddd; }
     #gyroBtn { padding:10px 12px; border-radius:12px; border:1px solid #ddd; background:#fff; }
@@ -41,75 +44,92 @@
   <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
 
   <script>
-    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body, Common } = Matter;
+    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body, Common, Query, Bounds } = Matter;
 
     // poly-decomp an Matter binden
     if (window.decomp && Common && Common.setDecomp) {
       Common.setDecomp(window.decomp);
     }
 
-    // ----- Canvas + Engine -----
     const canvas = document.getElementById("world");
+    const ui = document.getElementById("ui");
+    const input = document.getElementById("input");
+    const gyroBtn = document.getElementById("gyroBtn");
+
+    // ——— DPI-korrektes Canvas Sizing ———
+    function sizeCanvasToDisplaySize() {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = document.documentElement.clientWidth;
+      const cssH = document.documentElement.clientHeight;
+      if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
+        canvas.width = Math.floor(cssW * dpr);
+        canvas.height = Math.floor(cssH * dpr);
+      }
+      // Matter-Render muss in CSS-PX wissen
+      render.options.width = cssW;
+      render.options.height = cssH;
+      render.canvas.style.width = cssW + "px";
+      render.canvas.style.height = cssH + "px";
+    }
+
+    // ——— Engine & Render ———
     const engine = Engine.create();
-    engine.world.gravity.y = 1;
+    engine.world.gravity.y = 1; // Basisgravitation (wird ggf. von Gyro überschrieben)
     const render = Render.create({
       canvas,
       engine,
       options: {
-        width: window.innerWidth,
-        height: window.innerHeight,
+        width: 0, height: 0, // setzen wir gleich korrekt
         wireframes: false,
         background: "#fafafa",
-        pixelRatio: window.devicePixelRatio
+        pixelRatio: 1 // wir skalieren selbst per dpr
       }
     });
+    sizeCanvasToDisplaySize();
     Render.run(render);
     Runner.run(Runner.create(), engine);
 
-    // Resize
-    let walls = null;
-    function makeWalls() {
-      const w = render.options.width;
-      const h = render.options.height;
-      const t = 50;
-      if (walls) World.remove(engine.world, walls);
-      walls = Matter.Composite.create();
-      Matter.Composite.add(walls, [
-        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }),
-        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),
-        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),
-        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })
+    // ——— Wände (mit sicherem Innenrand) ———
+    let wallsComposite = null;
+    const WALL_THICK = 50;
+    function rebuildWalls() {
+      if (wallsComposite) World.remove(engine.world, wallsComposite);
+      const w = render.options.width, h = render.options.height, t = WALL_THICK;
+      wallsComposite = Matter.Composite.create();
+      Matter.Composite.add(wallsComposite, [
+        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }), // Boden
+        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),     // Decke
+        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),     // links
+        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })   // rechts
       ]);
-      World.add(engine.world, walls);
+      World.add(engine.world, wallsComposite);
     }
-    function resize() {
-      render.canvas.width = window.innerWidth;
-      render.canvas.height = window.innerHeight;
-      render.options.width = window.innerWidth;
-      render.options.height = window.innerHeight;
-      makeWalls();
-    }
-    window.addEventListener("resize", resize);
-    makeWalls();
+    rebuildWalls();
 
-    // ----- Font laden (lokal) mit Fallback -----
+    // ——— Font laden (lokal) mit Fallback (für opentype) ———
     const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf";
     const FALLBACK_TTF = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/montserrat/Montserrat-Regular.ttf";
+    let fontOT = null;      // opentype Font (Physik-Pfade)
+    let canvasFontReady = false; // Canvas-Font (sichtbar)
 
-    let font = null;
-    function loadFont(url, cb){ opentype.load(url, (err, f) => cb(err, f)); }
-    loadFont(LOCAL_FONT_URL, (err, f) => {
-      if (!err && f) { font = f; console.log("Font (lokal) geladen ✔️"); }
+    function loadOTFont(url, cb){ opentype.load(url, (err, f) => cb(err, f)); }
+    loadOTFont(LOCAL_FONT_URL, (err, f) => {
+      if (!err && f) { fontOT = f; console.log("opentype Font geladen ✔️"); }
       else {
-        console.warn("Lokaler Font-Load fail, Fallback:", err);
-        loadFont(FALLBACK_TTF, (e2, f2) => {
-          if (!e2 && f2) { font = f2; console.log("Fallback-Font geladen ✔️"); }
-          else console.error("Kein Font verfügbar:", e2);
+        console.warn("Lokaler opentype-Load fail, Fallback:", err);
+        loadOTFont(FALLBACK_TTF, (e2, f2) => {
+          if (!e2 && f2) { fontOT = f2; console.log("Fallback opentype Font geladen ✔️"); }
+          else console.error("Kein opentype Font verfügbar:", e2);
         });
       }
     });
+    // Canvas-Font laden (für sichtbares fillText)
+    Promise.all([
+      document.fonts.load('400 16px "MontserratVar"').catch(()=>{}),
+      document.fonts.ready.catch(()=>{})
+    ]).then(()=>{ canvasFontReady = true; });
 
-    // ----- Hilfen: Kurven-Sampling + RDP-Simplify -----
+    // ——— Kurven-Sampling + RDP-Simplify ———
     function quadAt(p0, p1, p2, t) {
       const x = (1-t)*(1-t)*p0.x + 2*(1-t)*t*p1.x + t*t*p2.x;
       const y = (1-t)*(1-t)*p0.y + 2*(1-t)*t*p1.y + t*t*p2.y;
@@ -121,26 +141,6 @@
       const y = mt*mt*mt*p0.y + 3*mt*mt*t*p1.y + 3*mt*t*t*p2.y + t*t*t*p3.y;
       return {x,y};
     }
-    // Ramer–Douglas–Peucker Simplify
-    function rdp(points, epsilon) {
-      if (points.length < 3) return points.slice();
-      const dmax = (() => {
-        const [p0, pn] = [points[0], points[points.length-1]];
-        let idx = -1, maxDist = -1;
-        for (let i=1; i<points.length-1; i++) {
-          const d = pointLineDistance(points[i], p0, pn);
-          if (d > maxDist) { idx = i; maxDist = d; }
-        }
-        return {idx, maxDist};
-      })();
-      if (dmax.maxDist > epsilon) {
-        const rec1 = rdp(points.slice(0, dmax.idx+1), epsilon);
-        const rec2 = rdp(points.slice(dmax.idx), epsilon);
-        return rec1.slice(0, -1).concat(rec2);
-      } else {
-        return [points[0], points[points.length-1]];
-      }
-    }
     function pointLineDistance(p, a, b) {
       const A = p.x - a.x, B = p.y - a.y, C = b.x - a.x, D = b.y - a.y;
       const dot = A*C + B*D;
@@ -150,14 +150,25 @@
       const dx = p.x - x, dy = p.y - y;
       return Math.hypot(dx, dy);
     }
-
-    // opentype-Pfad → Polygone (gesampelt + vereinfacht)
+    function rdp(points, epsilon) {
+      if (points.length < 3) return points.slice();
+      let idx = -1, maxDist = -1;
+      for (let i=1;i<points.length-1;i++){
+        const d = pointLineDistance(points[i], points[0], points[points.length-1]);
+        if (d > maxDist) { idx = i; maxDist = d; }
+      }
+      if (maxDist > epsilon) {
+        const left = rdp(points.slice(0, idx+1), epsilon);
+        const right = rdp(points.slice(idx), epsilon);
+        return left.slice(0, -1).concat(right);
+      }
+      return [points[0], points[points.length-1]];
+    }
     function pathToPolygons(path) {
       const polys = [];
       let cur = [];
       let last = {x:0,y:0};
-      const STEP_Q = 12; // höher = glatter
-      const STEP_C = 18;
+      const STEP_Q = 12, STEP_C = 18;
 
       path.commands.forEach(cmd => {
         if (cmd.type === "M") {
@@ -166,24 +177,17 @@
           cur.push(last);
         } else if (cmd.type === "L") {
           const p = { x: cmd.x, y: -cmd.y };
-          cur.push(p);
-          last = p;
+          cur.push(p); last = p;
         } else if (cmd.type === "Q") {
           const cp = { x: cmd.x1, y: -cmd.y1 };
-          const p2 = { x: cmd.x,  y: -cmd.y  };
-          for (let i = 1; i <= STEP_Q; i++) {
-            const t = i/STEP_Q;
-            cur.push(quadAt(last, cp, p2, t));
-          }
+          const p2 = { x: cmd.x,  y: -cmd.y };
+          for (let i=1;i<=STEP_Q;i++) cur.push(quadAt(last, cp, p2, i/STEP_Q));
           last = p2;
         } else if (cmd.type === "C") {
           const c1 = { x: cmd.x1, y: -cmd.y1 };
           const c2 = { x: cmd.x2, y: -cmd.y2 };
-          const p3 = { x: cmd.x,  y: -cmd.y  };
-          for (let i = 1; i <= STEP_C; i++) {
-            const t = i/STEP_C;
-            cur.push(cubicAt(last, c1, c2, p3, t));
-          }
+          const p3 = { x: cmd.x,  y: -cmd.y };
+          for (let i=1;i<=STEP_C;i++) cur.push(cubicAt(last, c1, c2, p3, i/STEP_C));
           last = p3;
         } else if (cmd.type === "Z") {
           if (cur.length) { polys.push(cur); cur = []; }
@@ -191,41 +195,80 @@
       });
       if (cur.length) polys.push(cur);
 
-      // Vereinfachen per RDP (Toleranz in Pixeln)
-      const EPS = 0.8;
+      const EPS = 0.8; // px
       return polys.map(poly => (poly.length > 3 ? rdp(poly, EPS) : poly));
     }
 
-    // ----- Buchstaben-Verwaltung -----
+    // ——— Buchstaben-Verwaltung ———
     const letters = [];
     const LETTER_TTL_MS = 30000;
 
+    // Hilfsfunktion: Bounding-Box der Polygone
+    function polygonsBounds(polys) {
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+      polys.forEach(poly => {
+        poly.forEach(p => {
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        });
+      });
+      return { min:{x:minX,y:minY}, max:{x:maxX,y:maxY}, width:maxX-minX, height:maxY-minY };
+    }
+
+    // Prüfen, ob Spawnbereich frei ist (keine Wände / Bodies)
+    function canSpawnAt(x, y, width, height) {
+      const margin = 6; // kleiner Puffer
+      const region = { min: { x: x - width/2 - margin, y: y - height/2 - margin },
+                       max: { x: x + width/2 + margin, y: y + height/2 + margin } };
+      // Alle Bodies in Region (inkl. Wände)
+      const bodies = Composite.allBodies(engine.world);
+      const hits = Query.region(bodies, region);
+      // Erlaube Spawn nur, wenn nichts außer Sensor-Bodies drin ist
+      return hits.length === 0;
+    }
+
     function spawnLetter(char) {
-      if (!font) return;
-
+      if (!fontOT) return; // noch nicht geladen
+      // Schriftgröße
       const size = 100;
-      const path = font.getPath(char, 0, 0, size);
-      const polygons = pathToPolygons(path);
-      if (!polygons.length) return;
 
-      const body = Bodies.fromVertices(
-        render.options.width / 2,
-        Math.max(120, window.innerHeight * 0.2),
-        polygons,
-        {
-          friction: 0.85,
-          frictionStatic: 1.0,
-          frictionAir: 0.01,
-          restitution: 0.18,
-          render: { fillStyle: "#00000000" }
-        },
-        true
-      );
+      // Pfad + Polygone
+      const path = fontOT.getPath(char, 0, 0, size);
+      const polys = pathToPolygons(path);
+      if (!polys.length) return;
+
+      // BBox der Polys → sichere Spawn-Position bestimmen (zentriert + Innenrand)
+      const w = render.options.width, h = render.options.height;
+      const bounds = polygonsBounds(polys);
+      const safeInset = WALL_THICK + 8;
+      // Ziel: echte Bildmitte, aber clampen, so dass der Buchstabe vollständig innerhalb liegt
+      let spawnX = Math.max(safeInset + bounds.width/2, Math.min(w - safeInset - bounds.width/2, w/2));
+      // Nicht hinter dem UI-Balken spawnen
+      const uiH = ui.getBoundingClientRect().height || 0;
+      let spawnY = Math.max(safeInset + bounds.height/2, Math.min(h - uiH - safeInset - bounds.height/2, h/2));
+
+      // Wenn der Bereich belegt ist (z. B. Buchstaben liegen da): NICHT spawnen
+      if (!canSpawnAt(spawnX, spawnY, bounds.width, bounds.height)) {
+        // Optional visuelles Feedback
+        input.animate([{transform:'scale(1)'},{transform:'scale(0.98)'},{transform:'scale(1)'}], {duration:180});
+        return;
+      }
+
+      // Physik-Body aus Vertices (poly-decomp zerlegt)
+      const body = Bodies.fromVertices(spawnX, spawnY, polys, {
+        friction: 0.9,
+        frictionStatic: 1.0,
+        frictionAir: 0.01,
+        restitution: 0.12,
+        render: { fillStyle: "#00000000" }
+      }, true);
       if (!body) return;
 
       // Masse ≈ Fläche (grobe Annäherung)
       try {
-        const flat = polygons.flat();
+        const flat = polys.flat();
         const hull = Vertices.hull(flat);
         const area = Math.abs(Vertices.area(hull));
         if (area && isFinite(area)) Body.setMass(body, Math.max(1, area / 1500));
@@ -243,19 +286,17 @@
       }, LETTER_TTL_MS);
     }
 
-    // ----- Eingabe -----
-    const input = document.getElementById("input");
+    // ——— Eingabe (nur wenn Platz) ———
     input.addEventListener("beforeinput", (e) => {
       if (e.inputType === "insertText" && e.data) {
+        e.preventDefault(); // wir verwalten eigene Eingabe
         spawnLetter(e.data[0]);
       }
     });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); spawnLetter("•"); }
-    });
 
-    // ----- Rendering (sichtbare Schrift) -----
+    // ——— Rendering (nur wenn Canvas-Font geladen) ———
     Events.on(render, "afterRender", () => {
+      if (!canvasFontReady) return;
       const ctx = render.context;
       ctx.save();
       ctx.textAlign = "center";
@@ -277,20 +318,33 @@
       ctx.restore();
     });
 
-    // ----- Gyro -----
-    const gyroBtn = document.getElementById("gyroBtn");
-    async function enableGyro() {
+    // ——— Gyro: Desktop-Fallback sicher ———
+    let gyroActive = false;
+    gyroBtn.addEventListener("click", async () => {
       try {
         if (typeof DeviceOrientationEvent !== "undefined" &&
             typeof DeviceOrientationEvent.requestPermission === "function") {
           const res = await DeviceOrientationEvent.requestPermission();
           if (res !== "granted") { alert("Bitte Bewegungszugriff erlauben."); return; }
         }
+        gyroActive = true;
+        let lastUpdate = performance.now();
         window.addEventListener("deviceorientation", (ev) => {
-          const gx = (ev.gamma || 0) / 18;
-          const gy = (ev.beta  || 0) / 18;
-          engine.world.gravity.x = Math.max(-2, Math.min(2, gx));
-          engine.world.gravity.y = Math.max(-2, Math.min(2, gy));
+          // Desktop liefert oft null → dann NICHT auf 0 setzen, sondern Basisgravitation beibehalten
+          const hasData = (typeof ev.beta === "number" && !isNaN(ev.beta)) || (typeof ev.gamma === "number" && !isNaN(ev.gamma));
+          if (hasData) {
+            const gx = (ev.gamma || 0) / 18;
+            const gy = (ev.beta  || 0) / 18;
+            engine.world.gravity.x = Math.max(-2, Math.min(2, gx));
+            engine.world.gravity.y = Math.max(-2, Math.min(2, gy));
+            lastUpdate = performance.now();
+          } else {
+            // Wenn 1s lang keine Sensorwerte: sanft zur Standardgravitation zurück
+            if (performance.now() - lastUpdate > 1000) {
+              engine.world.gravity.x = 0;
+              engine.world.gravity.y = 1;
+            }
+          }
         }, { passive: true });
         gyroBtn.textContent = "Gyro aktiv";
         gyroBtn.disabled = true;
@@ -298,11 +352,15 @@
         console.error(e);
         alert("Gyro konnte nicht aktiviert werden.");
       }
-    }
-    gyroBtn.addEventListener("click", enableGyro);
+    });
 
-    // initial
-    resize();
+    // ——— Resize-Handling ———
+    function onResize() {
+      sizeCanvasToDisplaySize();
+      rebuildWalls();
+    }
+    window.addEventListener("resize", onResize);
+    onResize();
   </script>
 </body>
 </html>
