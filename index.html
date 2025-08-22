@@ -25,10 +25,49 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
 
-  <script>
-    const { Engine, Render, Runner, World, Bodies, Body, Composite, Common, Events, Vertices, Query } = Matter;
+ <!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Typo Voice Physics</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; background:#fafafa; }
+    canvas { display:block; touch-action:none; }
 
-    // poly-decomp verbinden
+    @font-face {
+      font-family: "MontserratVar";
+      src: url("fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
+      font-weight: 100 900;
+      font-style: normal;
+      font-display: swap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="world"></canvas>
+
+  <!-- poly-decomp für Polygon-Zerlegung -->
+  <script src="https://cdn.jsdelivr.net/npm/poly-decomp@0.3.0/build/decomp.min.js"></script>
+  <!-- Matter.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <!-- opentype.js -->
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
+
+  <script>
+    const {
+      Engine, Render, Runner, World, Bodies, Body, Composite,
+      Common, Events, Vertices, Query
+    } = Matter;
+
+    // --- Konstante Einstellungen & globale Variablen (VOR Nutzung!) ---
+    const WALL_THICK = 60;
+    let walls = null;        // Ränder-Composite
+    const MIC_R = 120;       // Mic-Button Radius (Ø 240)
+    let micBody = null;      // Mic-Button-Body
+
+    // poly-decomp an Matter binden
     if (window.decomp && Common && Common.setDecomp) Common.setDecomp(window.decomp);
 
     // ---------- Canvas & Engine (CSS-Pixel 1:1) ----------
@@ -36,15 +75,21 @@
     const engine = Engine.create({
       enableSleeping: true
     });
-    // beruhigtere Solver-Iterationen
+    // Beruhigtere Physik:
+    engine.world.gravity.y = 1;
     engine.positionIterations = 8;
     engine.velocityIterations = 8;
     engine.constraintIterations = 2;
-    engine.world.gravity.y = 1;
+    engine.timing.timeScale = 1;
 
     const render = Render.create({
       canvas, engine,
-      options: { width: 0, height: 0, wireframes: false, background: "#fafafa", pixelRatio: 1 }
+      options: {
+        width: 0, height: 0,
+        wireframes: false,
+        background: "#fafafa",
+        pixelRatio: 1 // KEIN DPR-Scaling -> stabiles Pointer-Hit-Testing
+      }
     });
 
     function resize() {
@@ -53,37 +98,43 @@
       if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
       render.options.width = w; render.options.height = h;
       render.canvas.style.width = w + "px"; render.canvas.style.height = h + "px";
-      buildWalls(); placeMic();
+      buildWalls();
+      placeMic();
     }
     window.addEventListener('resize', resize);
-    Render.run(render); Runner.run(Runner.create(), engine);
+    Render.run(render);
+    Runner.run(Runner.create(), engine);
     resize();
 
     // ---------- Unsichtbare Wände (Ränder) ----------
-    const WALL_THICK = 60;
-    let walls = null;
     function buildWalls() {
       if (walls) World.remove(engine.world, walls);
       const w = render.options.width, h = render.options.height, t = WALL_THICK;
       walls = Composite.create();
-      const stat = { isStatic: true, friction: 1, restitution: 0.02, render: { visible: false } };
+      const stat = {
+        isStatic: true,
+        friction: 1,
+        restitution: 0.02,  // sehr wenig Bounciness
+        render: { visible: false }
+      };
       Composite.add(walls, [
-        Bodies.rectangle(w/2, h + t/2, w, t, stat), // Boden
-        Bodies.rectangle(w/2, -t/2, w, t, stat),    // Decke
-        Bodies.rectangle(-t/2, h/2, t, h, stat),    // links
-        Bodies.rectangle(w + t/2, h/2, t, h, stat)  // rechts
+        Bodies.rectangle(w/2, h + t/2, w, t, stat),
+        Bodies.rectangle(w/2, -t/2, w, t, stat),
+        Bodies.rectangle(-t/2, h/2, t, h, stat),
+        Bodies.rectangle(w + t/2, h/2, t, h, stat)
       ]);
       World.add(engine.world, walls);
     }
 
     // ---------- Mic-Button als Collider ----------
-    const MIC_R = 120; // Radius (Ø 240)
-    let micBody = null;
     function placeMic() {
       if (micBody) World.remove(engine.world, micBody);
       const w = render.options.width, h = render.options.height;
       micBody = Bodies.circle(w/2, h - MIC_R - 20, MIC_R, {
-        isStatic: true, friction: 1, frictionStatic: 1, restitution: 0.05, render: { visible: false }
+        isStatic: true,
+        friction: 1, frictionStatic: 1,
+        restitution: 0.05,
+        render: { visible: false }
       });
       World.add(engine.world, micBody);
     }
@@ -123,9 +174,9 @@
 
     // ---------- Lautstärke → Schriftschnitt ----------
     let isRecording = false;
-    let currentWord = "";         // live-Rendering text
-    let currentWght = 400;        // 100..800
-    let maxVolume = 0;            // Peak über die Aufnahme
+    let currentWord = "";   // live-Text (Zeile)
+    let currentWght = 400;  // 100..800
+    let maxVolume = 0;
     let audioCtx = null, analyser = null, mediaStream = null;
 
     function startAudioMeter() {
@@ -148,12 +199,11 @@
       if (!analyser) return;
       const buf = new Float32Array(analyser.fftSize);
       analyser.getFloatTimeDomainData(buf);
-      // RMS
       let sum = 0; for (let i=0;i<buf.length;i++){ const v=buf[i]; sum += v*v; }
-      const rms = Math.sqrt(sum / buf.length); // ~0..1
+      const rms = Math.sqrt(sum / buf.length);                  // ~0..1
       maxVolume = Math.max(maxVolume, rms);
-      const v = Math.min(1, rms * 8); // Verstärkung
-      const wght = Math.round(100 + (800-100) * v);
+      const v = Math.min(1, rms * 8);                           // Verstärkung
+      const wght = Math.round(100 + (800-100) * v);             // 100..800
       currentWght = Math.max(100, Math.min(800, wght));
       requestAnimationFrame(tickVolume);
     }
@@ -177,7 +227,7 @@
         for (let i=e.resultIndex; i<e.results.length; i++){
           const res = e.results[i];
           if (res.isFinal) finalText += res[0].transcript;
-          else currentWord = res[0].transcript; // live anzeigen
+          else currentWord = res[0].transcript; // live zeigen
         }
         if (finalText.trim()) currentWord = finalText.trim();
       };
@@ -186,10 +236,7 @@
 
       startAudioMeter().then(()=>{
         try { recognition.start(); isRecording = true; } catch(e){ console.error(e); isRecording=false; }
-      }).catch(err=>{
-        console.error(err);
-        // zur Not ohne Speech, aber mit AudioMeter?
-      });
+      }).catch(err=> console.error(err));
     }
     function stopSpeech() {
       try { recognition && recognition.stop(); } catch{}
@@ -198,7 +245,7 @@
 
     // ---------- Wort → Physik (zerfällt in Buchstaben) ----------
     const LETTER_TTL_MS = 30000;
-    const letterGroups = []; // Verwaltung zum Aufräumen
+    const letterGroups = [];
 
     function measureWord(word, size) {
       const scale = size / fontOT.unitsPerEm;
@@ -231,7 +278,6 @@
         const g = glyphs[i];
         const path = g.getPath(0, 0, size);
         const polys = pathToPolygons(path);
-        // Advance inkl. Kerning
         const scale = size / fontOT.unitsPerEm;
         const adv = (g.advanceWidth * scale) + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0);
 
@@ -240,15 +286,15 @@
           const body = Bodies.fromVertices(spawnX, spawnY, shifted, {
             friction: 0.9,
             frictionStatic: 1.0,
-            frictionAir: 0.03,     // beruhigt
-            restitution: 0.05,     // wenig Bounciness
+            frictionAir: 0.035,    // beruhigt die Bewegung
+            restitution: 0.04,     // sehr wenig Bounciness
             render: { visible: false },
-            sleepThreshold: 30
+            sleepThreshold: 40
           }, true);
           if (body){
             const ch = chars[charIdx] || " ";
             body.label = "char:" + ch;
-            // Masse/Dichte: Grundfläche * Zufall * Lautstärke
+            // Masse/Dichte: Fläche * Zufall * Lautstärke
             try {
               const flat = shifted.flat();
               const hull = Vertices.hull(flat);
@@ -258,8 +304,7 @@
               const mass = Math.max(1, (area/1500) * loudFactor * randFactor);
               Body.setMass(body, mass);
             } catch {}
-            // unterschiedliche Starrotation
-            Body.setAngularVelocity(body, (Math.random()*2-1) * 0.3);
+            Body.setAngularVelocity(body, (Math.random()*2-1) * 0.35); // unterschiedliche Startrotation
             letters.push({ body, char: ch, size, wght });
             Composite.add(engine.world, body);
           }
@@ -268,7 +313,6 @@
         penX += adv;
       }
 
-      // Auto-Remove
       const group = { letters };
       letterGroups.push(group);
       setTimeout(()=>{
@@ -278,14 +322,13 @@
     }
 
     function finalizeWord() {
-      stopAudioMeter();
       const word = (currentWord || "").trim();
-      if (!word) return;
-      // letzten wght nehmen (während Aufnahme dynamisch)
+      currentWord = ""; // Zeile leeren
+      if (!word) { stopAudioMeter(); return; }
       const size = 100;
-      const wght = currentWght;
+      const wght = currentWght;  // letzter dynamischer Wert
       const peak = maxVolume;
-      currentWord = ""; // live-anzeige beenden
+      stopAudioMeter();
       spawnFallingWord(word, size, wght, peak);
     }
 
@@ -296,23 +339,22 @@
       ctx.textAlign = "center";
       ctx.textBaseline = "alphabetic";
 
-      // 1) Live-Wort als Zeile in der Mitte (solange aufgenommen wird oder interim da ist)
+      // Live-Zeile in der Mitte (während Aufnahme)
       if (canvasFontReady && (isRecording || currentWord)) {
         const w = render.options.width, h = render.options.height;
         const inset = WALL_THICK + 8;
-        ctx.font = `${currentWght} ${120}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-        let text = currentWord || "";
-        // Breite messen & clampen in die sichere Zone
-        const metrics = ctx.measureText(text);
-        const textWidth = metrics.width;
-        let x = Math.max(inset + textWidth/2, Math.min(w - inset - textWidth/2, w/2));
-        let y = Math.max(inset + 120, Math.min(h - inset - (MIC_R + 24), h/2));
+        const fontSize = 120;
+        ctx.font = `${currentWght} ${fontSize}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+        const text = currentWord || "";
+        const tw = ctx.measureText(text).width;
+        const x = Math.max(inset + tw/2, Math.min(w - inset - tw/2, w/2));
+        const y = Math.max(inset + fontSize, Math.min(h - inset - (MIC_R + 24), h/2));
         ctx.fillStyle = "#222";
         ctx.shadowColor = "rgba(0,0,0,0.20)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
         ctx.fillText(text, x, y);
       }
 
-      // 2) Physische Buchstaben zeichnen
+      // Physik-Buchstaben
       if (canvasFontReady) {
         ctx.shadowColor = "rgba(0,0,0,0.20)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
         for (const group of letterGroups) {
@@ -330,7 +372,7 @@
         }
       }
 
-      // 3) Mic-Button schwarz, groß, klickbar
+      // Mic-Button (schwarz, Ø 240, Klickzone)
       if (micBody) {
         const { x, y } = micBody.position;
         ctx.save();
@@ -346,7 +388,7 @@
       ctx.restore();
     });
 
-    // ---------- Pointer: press & hold auf Mic-Kreis ----------
+    // ---------- Pointer: Press & Hold auf Mic-Kreis ----------
     function hitMic(evt) {
       if (!micBody) return false;
       const rect = canvas.getBoundingClientRect();
@@ -368,6 +410,10 @@
     canvas.addEventListener('pointercancel', ()=> { if (isRecording) stopSpeech(); });
     window.addEventListener('blur', ()=> { if (isRecording) stopSpeech(); });
 
+    // ---------- Ende ----------
   </script>
+</body>
+</html>
+
 </body>
 </html>
