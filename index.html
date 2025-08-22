@@ -4,21 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <title>Gyro Typo Playground</title>
+  <title>Gyro Typo – Voice</title>
   <style>
     html, body { margin:0; padding:0; height:100%; background:#fafafa; }
-    canvas { display:block; } /* Größe setzen wir per JS exakt */
-    #ui {
-      position: fixed; left:0; right:0; bottom:0;
-      display:flex; gap:8px; padding:10px;
-      background:linear-gradient(to top, rgba(250,250,250,0.95), rgba(250,250,250,0.6));
-      align-items:center; backdrop-filter:saturate(1.1) blur(6px);
-      z-index:10;
-    }
-    #input { flex:1; font-size:16px; padding:10px 12px; border-radius:12px; border:1px solid #ddd; }
-    #gyroBtn { padding:10px 12px; border-radius:12px; border:1px solid #ddd; background:#fff; }
+    canvas { display:block; }
 
-    /* Deine Schrift – stelle sicher, dass die URL unten erreichbar ist */
+    /* Lokale Schrift – passe den Pfad an dein Repo an! */
     @font-face {
       font-family: "MontserratVar";
       src: url("fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
@@ -26,18 +17,12 @@
       font-style: normal;
       font-display: swap;
     }
-    .use-montserrat { font-family:"MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
   </style>
 </head>
 <body>
   <canvas id="world"></canvas>
 
-  <div id="ui" class="use-montserrat">
-    <input id="input" type="text" placeholder="Tippe hier einzelne Buchstaben…" inputmode="latin" />
-    <button id="gyroBtn" type="button">Gyro aktivieren</button>
-  </div>
-
-  <!-- poly-decomp -->
+  <!-- poly-decomp (für Polygon-Zerlegung) -->
   <script src="https://cdn.jsdelivr.net/npm/poly-decomp@0.3.0/build/decomp.min.js"></script>
   <!-- Matter.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
@@ -45,19 +30,32 @@
   <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
 
   <script>
-    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body, Common, Query, Bounds, Composite } = Matter;
+    const {
+      Engine, Render, Runner, World, Bodies, Body, Composite,
+      Common, Events, Vertices, Query, Constraint
+    } = Matter;
 
     // poly-decomp an Matter binden
     if (window.decomp && Common && Common.setDecomp) {
       Common.setDecomp(window.decomp);
     }
 
+    // ---------- Canvas/Engine ----------
     const canvas = document.getElementById("world");
-    const ui = document.getElementById("ui");
-    const input = document.getElementById("input");
-    const gyroBtn = document.getElementById("gyroBtn");
+    const engine = Engine.create();
+    engine.world.gravity.y = 1; // Basisgravitation; Physik immer aktiv
 
-    // DPI-korrektes Canvas
+    const render = Render.create({
+      canvas,
+      engine,
+      options: {
+        width: 0, height: 0, // setzen wir gleich
+        wireframes: false,
+        background: "#fafafa",
+        pixelRatio: 1
+      }
+    });
+
     function sizeCanvasToDisplaySize() {
       const dpr = window.devicePixelRatio || 1;
       const cssW = document.documentElement.clientWidth;
@@ -71,53 +69,62 @@
       render.canvas.style.width = cssW + "px";
       render.canvas.style.height = cssH + "px";
     }
-
-    // Engine & Render
-    const engine = Engine.create();
-    engine.world.gravity.y = 1; // Basisgravitation
-    const render = Render.create({
-      canvas,
-      engine,
-      options: {
-        width: 0, height: 0,
-        wireframes: false,
-        background: "#fafafa",
-        pixelRatio: 1 // wir skalieren selbst
-      }
-    });
     sizeCanvasToDisplaySize();
     Render.run(render);
     Runner.run(Runner.create(), engine);
 
-    // Wände
-    let wallsComposite = null;
+    // ---------- Unsichtbare Wände (volle Bildschirmränder) ----------
     const WALL_THICK = 50;
-    function rebuildWalls() {
-      if (wallsComposite) World.remove(engine.world, wallsComposite);
+    let walls = null;
+    function buildWalls() {
+      if (walls) World.remove(engine.world, walls);
       const w = render.options.width, h = render.options.height, t = WALL_THICK;
-      wallsComposite = Matter.Composite.create();
-      Matter.Composite.add(wallsComposite, [
-        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }),
-        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),
-        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),
-        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })
+      walls = Composite.create();
+      const opts = { isStatic: true, render: { visible: false } }; // unsichtbar!
+      Composite.add(walls, [
+        Bodies.rectangle(w/2, h + t/2, w, t, opts), // Boden
+        Bodies.rectangle(w/2, -t/2, w, t, opts),    // Decke
+        Bodies.rectangle(-t/2, h/2, t, h, opts),    // links
+        Bodies.rectangle(w + t/2, h/2, t, h, opts)  // rechts
       ]);
-      World.add(engine.world, wallsComposite);
+      World.add(engine.world, walls);
     }
-    rebuildWalls();
 
-    // Font laden (opentype für Physik + Canvas-Font für Sichtbarkeit)
-    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf"; // <- passe das an DEINEN Pfad an
-    const FALLBACK_TTF = ""; // optionaler zweiter TTF-Host (mit CORS), sonst leer lassen
+    // ---------- Mic-Button als physischer Collider ----------
+    const MIC_R = 36; // px
+    let micBody = null;
+    function placeMic() {
+      if (micBody) World.remove(engine.world, micBody);
+      const w = render.options.width, h = render.options.height;
+      const y = h - MIC_R - 14; // etwas Abstand vom unteren Rand
+      micBody = Bodies.circle(w/2, y, MIC_R, {
+        isStatic: true,
+        restitution: 0.2,
+        friction: 0.9,
+        frictionStatic: 1.0,
+        render: { fillStyle: "transparent" } // wir malen selbst
+      });
+      World.add(engine.world, micBody);
+    }
 
-    let fontOT = null;          // opentype Font
+    // ---------- Responsiveness ----------
+    function onResize() {
+      sizeCanvasToDisplaySize();
+      buildWalls();
+      placeMic();
+    }
+    window.addEventListener('resize', onResize);
+    onResize();
+
+    // ---------- Font laden ----------
+    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf"; // <- passe an
+    let fontOT = null;
     let canvasFontReady = false;
 
     function loadOTFont(url) {
-      return new Promise((resolve, reject) => {
-        if (!url) return reject(new Error("No URL"));
-        opentype.load(url, (err, f) => err ? reject(err) : resolve(f));
-      });
+      return new Promise((resolve, reject) =>
+        opentype.load(url, (err, f) => err ? reject(err) : resolve(f))
+      );
     }
 
     (async () => {
@@ -125,25 +132,22 @@
         fontOT = await loadOTFont(LOCAL_FONT_URL);
         console.log("opentype Font geladen ✔️");
       } catch (e) {
-        console.warn("Lokaler opentype-Load fehlgeschlagen:", e);
-        if (FALLBACK_TTF) {
-          try {
-            fontOT = await loadOTFont(FALLBACK_TTF);
-            console.log("Fallback opentype Font geladen ✔️");
-          } catch (e2) {
-            console.error("Kein opentype Font verfügbar:", e2);
-          }
-        }
+        console.error("Font konnte nicht geladen werden:", e);
       }
     })();
 
     (async () => {
-      try { await Promise.race([document.fonts.load('600 100px "MontserratVar"'), new Promise(r=>setTimeout(r,1500))]); } catch {}
+      try {
+        await Promise.race([
+          document.fonts.load('600 100px "MontserratVar"'),
+          new Promise(r=>setTimeout(r, 1500))
+        ]);
+      } catch {}
       try { await document.fonts.ready; } catch {}
       canvasFontReady = true;
     })();
 
-    // Kurven-Sampling & RDP-Simplify
+    // ---------- Pfad-Sampling + Vereinfachung ----------
     function quadAt(p0, p1, p2, t) {
       const x = (1-t)*(1-t)*p0.x + 2*(1-t)*t*p1.x + t*t*p2.x;
       const y = (1-t)*(1-t)*p0.y + 2*(1-t)*t*p1.y + t*t*p2.y;
@@ -177,7 +181,6 @@
       }
       return [points[0], points[points.length-1]];
     }
-
     function pathToPolygons(path) {
       const polys = [];
       let cur = [];
@@ -213,165 +216,335 @@
       return polys.map(poly => (poly.length > 3 ? rdp(poly, EPS) : poly));
     }
 
-    // Spawn-Helfer
-    function polygonsBounds(polys) {
-      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-      polys.forEach(poly => {
-        poly.forEach(p => {
-          if (p.x < minX) minX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y > maxY) maxY = p.y;
-        });
-      });
-      return { min:{x:minX,y:minY}, max:{x:maxX,y:maxY}, width:maxX-minX, height:maxY-minY };
+    // ---------- Wort-Spawn (Verbund + Sollbruchstellen) ----------
+    const LETTER_TTL_MS = 30000;
+    const words = []; // [{letters:[bodies], constraints:[c], size, born}]
+    function measureWord(word, size) {
+      const scale = size / fontOT.unitsPerEm;
+      const glyphs = fontOT.stringToGlyphs(word);
+      let width = 0;
+      for (let i = 0; i < glyphs.length; i++) {
+        const g = glyphs[i];
+        width += g.advanceWidth * scale;
+        if (i < glyphs.length - 1) {
+          width += fontOT.getKerningValue(g, glyphs[i+1]) * scale;
+        }
+      }
+      return { glyphs, width, scale };
     }
-
-    function canSpawnAt(x, y, width, height) {
-      const margin = 6; // Puffer
-      const region = {
-        min: { x: x - width/2 - margin, y: y - height/2 - margin },
-        max: { x: x + width/2 + margin, y: y + height/2 + margin }
-      };
+    function canSpawnRegion(region) {
       const bodies = Composite.allBodies(engine.world);
       const hits = Query.region(bodies, region);
-      // blockieren, wenn irgendein echter Körper (nicht Sensor) im Startbereich liegt
+      // Wenn der Bereich frei von echten (nicht Sensor) Bodies ist → OK
       return !hits.some(b => !b.isSensor);
     }
+    function spawnWord(word) {
+      if (!fontOT) return;
+      word = word.trim();
+      if (!word) return;
 
-    const letters = [];
-    const LETTER_TTL_MS = 30000;
-
-    function spawnLetter(char) {
-      if (!fontOT) return; // Font noch nicht bereit
-
-      const size = 100;
-      const path = fontOT.getPath(char, 0, 0, size);
-      const polys = pathToPolygons(path);
-      if (!polys.length) return;
-
-      // Zielposition: echte Mitte, aber so geklemmt, dass der Buchstabe komplett innerhalb der Wände bleibt
+      const size = 84;              // Wort-Schriftgröße
+      const gapTighten = -2;        // leichte Negativlaufweite (optisch kompakt)
+      const { glyphs, width, scale } = measureWord(word, size);
+      // Spawn-Ziel: Mitte clamped an Wände
       const w = render.options.width, h = render.options.height;
-      const bounds = polygonsBounds(polys);
       const safeInset = WALL_THICK + 8;
-      let spawnX = Math.max(safeInset + bounds.width/2, Math.min(w - safeInset - bounds.width/2, w/2));
-      const uiH = ui.getBoundingClientRect().height || 0;
-      let spawnY = Math.max(safeInset + bounds.height/2, Math.min(h - uiH - safeInset - bounds.height/2, h/2));
-
-      // Wenn Bereich belegt, NICHT spawnen (=> "nicht weiterschreiben")
-      if (!canSpawnAt(spawnX, spawnY, bounds.width, bounds.height)) {
-        input.animate([{transform:'scale(1)'},{transform:'scale(0.98)'},{transform:'scale(1)'}], {duration:180});
+      let spawnX = Math.max(safeInset + width/2, Math.min(w - safeInset - width/2, w/2));
+      let spawnY = Math.max(safeInset + size/2, Math.min(h - safeInset - size/2 - (MIC_R+24), h/2));
+      // Region-Check (breite Rechteck-Approx des Wortes)
+      const region = {
+        min: { x: spawnX - width/2 - 6, y: spawnY - size/1.4 - 6 },
+        max: { x: spawnX + width/2 + 6, y: spawnY + size/1.8 + 6 }
+      };
+      if (!canSpawnRegion(region)) {
+        // kein Platz → nicht weiterschreiben
         return;
       }
 
-      const body = Bodies.fromVertices(
-        spawnX, spawnY, polys,
-        {
-          friction: 0.9,
-          frictionStatic: 1.0,
-          frictionAir: 0.01,
-          restitution: 0.12,
-          render: { fillStyle: "#00000000" } // wir malen Text selbst
-        },
-        true
-      );
-      if (!body) return;
+      // Für jedes Zeichen: Pfad → Polys → Body (mit Offsets)
+      const letters = [];
+      let penX = -width/2; // beginnen links, so dass die Wortmitte bei spawnX liegt
+      for (let i = 0; i < glyphs.length; i++) {
+        const g = glyphs[i];
+        const path = g.getPath(0, 0, size);
+        const polys = pathToPolygons(path);
+        if (!polys.length) {
+          // trotzdem Pen weiter
+          const adv = (g.advanceWidth * scale) + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0) + gapTighten;
+          penX += adv;
+          continue;
+        }
+        // Body aus Vertices, an (spawnX + penX + shift, spawnY)
+        const localShiftX = 0; // Glyphenpfad startet meist bei 0
+        const shiftedPolys = polys.map(poly => poly.map(p => ({ x: p.x + penX + localShiftX, y: p.y })));
+        const body = Bodies.fromVertices(spawnX, spawnY, shiftedPolys, {
+          friction: 0.9, frictionStatic: 1.0, frictionAir: 0.01, restitution: 0.12,
+          render: { fillStyle: "#00000000" }
+        }, true);
+        if (body) {
+          letters.push(body);
+        }
+        // Pen vorrücken
+        const adv = (g.advanceWidth * scale) + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0) + gapTighten;
+        penX += adv;
+      }
+      if (!letters.length) return;
 
-      // Masse ≈ Fläche (grobe Annäherung über konvexe Hülle)
-      try {
-        const flat = polys.flat();
-        const hull = Vertices.hull(flat);
-        const area = Math.abs(Vertices.area(hull));
-        if (area && isFinite(area)) Body.setMass(body, Math.max(1, area / 1500));
-      } catch {}
+      // Verbinden: Constraints zwischen benachbarten Buchstaben (Sollbruchstellen)
+      const constraints = [];
+      for (let i = 0; i < letters.length - 1; i++) {
+        const A = letters[i], B = letters[i+1];
+        const dx = (B.position.x - A.position.x), dy = (B.position.y - A.position.y);
+        const len = Math.hypot(dx, dy);
+        const c = Constraint.create({
+          bodyA: A, bodyB: B,
+          pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 },
+          length: Math.max(8, Math.min(24, len * 0.8)),
+          stiffness: 0.7,
+          damping: 0.02,
+          render: { visible: false }
+        });
+        constraints.push(c);
+      }
 
-      World.add(engine.world, body);
+      // Gruppe in die Welt
+      Composite.add(engine.world, letters);
+      Composite.add(engine.world, constraints);
 
-      const rec = { body, char, size, born: performance.now() };
-      letters.push(rec);
-
+      // Auto-Remove nach 30s
+      const born = performance.now();
+      const rec = { letters, constraints, word, size, born };
+      words.push(rec);
       setTimeout(() => {
-        World.remove(engine.world, body);
-        const idx = letters.indexOf(rec);
-        if (idx >= 0) letters.splice(idx, 1);
+        // entfernen
+        for (const c of rec.constraints) Composite.remove(engine.world, c);
+        for (const b of rec.letters) Composite.remove(engine.world, b);
+        const idx = words.indexOf(rec);
+        if (idx >= 0) words.splice(idx, 1);
       }, LETTER_TTL_MS);
     }
 
-    // Eingabe (einzelne Zeichen)
-    input.addEventListener("beforeinput", (e) => {
-      if (e.inputType === "insertText" && e.data) {
-        e.preventDefault(); // wir verwalten das Spawnen
-        spawnLetter(e.data[0]);
+    // Constraint-Bruch (reißende Worte)
+    Events.on(engine, "afterUpdate", () => {
+      for (const rec of words) {
+        for (let i = rec.constraints.length - 1; i >= 0; i--) {
+          const c = rec.constraints[i];
+          if (!c.bodyA || !c.bodyB) continue;
+          const ax = c.bodyA.position.x + (c.pointA?.x || 0);
+          const ay = c.bodyA.position.y + (c.pointA?.y || 0);
+          const bx = c.bodyB.position.x + (c.pointB?.x || 0);
+          const by = c.bodyB.position.y + (c.pointB?.y || 0);
+          const dist = Math.hypot(bx - ax, by - ay);
+          const breakLen = (c.length || 12) * 1.6; // wie viel Dehnung erlaubt
+          if (dist > breakLen) {
+            Composite.remove(engine.world, c);
+            rec.constraints.splice(i, 1);
+          }
+        }
       }
     });
 
-    // Sichtbares Text-Rendering (Canvas)
+    // ---------- Rendering: Worte + Mic-Button ----------
     Events.on(render, "afterRender", () => {
       if (!canvasFontReady) return;
       const ctx = render.context;
       ctx.save();
       ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
+      ctx.textBaseline = "alphabetic"; // bessere optische Lage
       ctx.shadowColor = "rgba(0,0,0,0.25)";
       ctx.shadowBlur = 6;
       ctx.shadowOffsetY = 1;
 
-      for (const { body, char, size } of letters) {
-        const { x, y } = body.position;
+      // alle Buchstaben aller Wörter zeichnen
+      for (const rec of words) {
+        for (const body of rec.letters) {
+          const { x, y } = body.position;
+          ctx.translate(x, y);
+          ctx.rotate(body.angle);
+          ctx.font = `700 ${rec.size}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
+          ctx.fillStyle = "#222";
+          // Body repräsentiert einen Buchstaben – wir brauchen das tatsächliche Zeichen nicht einzeln;
+          // Stattdessen nutzen wir den ursprünglichen Pfad-Zeichen-Offset:
+          // Einfachheitshalber zeichnen wir den nächsten bestpassenden Text über die Poly-Position:
+          // Für saubere Buchstaben-zu-Body-Mapping müssten wir pro Body das Zeichen merken;
+          // Hier speichern wir es pragmatisch im Label:
+          const ch = body.label && body.label.startsWith("char:") ? body.label.slice(5) : null;
+          if (ch) ctx.fillText(ch, 0, rec.size * 0.35);
+          ctx.rotate(-body.angle);
+          ctx.translate(-x, -y);
+        }
+      }
+
+      // Mic-Button zeichnen (über der Szene)
+      if (micBody) {
+        const { x, y } = micBody.position;
         ctx.translate(x, y);
-        ctx.rotate(body.angle);
-        ctx.font = `600 ${size}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
-        ctx.fillStyle = "#222";
-        ctx.fillText(char, 0, 0);
-        ctx.rotate(-body.angle);
+        // Kreis
+        ctx.beginPath();
+        ctx.arc(0, 0, MIC_R, 0, Math.PI*2);
+        ctx.closePath();
+        ctx.fillStyle = isRecording ? "#e74c3c" : "#ffffff";
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(0,0,0,0.2)";
+        ctx.stroke();
+        // Icon
+        ctx.font = `bold ${MIC_R}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+        ctx.fillStyle = isRecording ? "#fff" : "#333";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("🎤", 0, 1);
         ctx.translate(-x, -y);
       }
+
       ctx.restore();
     });
 
-    // Gyro mit Desktop-Fallback (nur echte Sensorwerte verwenden)
-    let gyroActive = false;
-    gyroBtn.addEventListener("click", async () => {
-      try {
-        if (typeof DeviceOrientationEvent !== "undefined" &&
-            typeof DeviceOrientationEvent.requestPermission === "function") {
-          const res = await DeviceOrientationEvent.requestPermission();
-          if (res !== "granted") { alert("Bitte Bewegungszugriff erlauben."); return; }
+    // Damit im Rendering der richtige Buchstabe auftaucht, überschreiben wir spawnWord leicht:
+    // Wir setzen 'label' = 'char:<zeichen>' beim Erzeugen des Bodies.
+    const _spawnWord = spawnWord;
+    spawnWord = function(word) {
+      if (!fontOT) return;
+      word = word.trim();
+      if (!word) return;
+
+      const size = 84;
+      const gapTighten = -2;
+      const { glyphs, width, scale } = measureWord(word, size);
+
+      const w = render.options.width, h = render.options.height;
+      const safeInset = WALL_THICK + 8;
+      let spawnX = Math.max(safeInset + width/2, Math.min(w - safeInset - width/2, w/2));
+      let spawnY = Math.max(safeInset + size/2, Math.min(h - safeInset - size/2 - (MIC_R+24), h/2));
+      const region = {
+        min: { x: spawnX - width/2 - 6, y: spawnY - size/1.4 - 6 },
+        max: { x: spawnX + width/2 + 6, y: spawnY + size/1.8 + 6 }
+      };
+      if (!canSpawnRegion(region)) return;
+
+      const letters = [];
+      let penX = -width/2;
+      let textChars = Array.from(word);
+      let charIndex = 0;
+
+      for (let i = 0; i < glyphs.length; i++) {
+        const g = glyphs[i];
+        const path = g.getPath(0, 0, size);
+        const polys = pathToPolygons(path);
+        const adv = (g.advanceWidth * scale) + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0) + gapTighten;
+
+        if (polys.length) {
+          const shiftedPolys = polys.map(poly => poly.map(p => ({ x: p.x + penX, y: p.y })));
+          const body = Bodies.fromVertices(spawnX, spawnY, shiftedPolys, {
+            friction: 0.9, frictionStatic: 1.0, frictionAir: 0.01, restitution: 0.12,
+            render: { fillStyle: "#00000000" }
+          }, true);
+          if (body) {
+            // Vermute das sichtbare Zeichen (fallback auf Leerzeichen)
+            const ch = textChars[charIndex] || " ";
+            body.label = "char:" + ch;
+            letters.push(body);
+            charIndex++;
+          }
         }
-        gyroActive = true;
-        let lastUpdate = performance.now();
-        window.addEventListener("deviceorientation", (ev) => {
-          const hasData = (typeof ev.beta === "number" && !isNaN(ev.beta)) ||
-                          (typeof ev.gamma === "number" && !isNaN(ev.gamma));
-          if (hasData) {
-            const gx = (ev.gamma || 0) / 18;
-            const gy = (ev.beta  || 0) / 18;
-            engine.world.gravity.x = Math.max(-2, Math.min(2, gx));
-            engine.world.gravity.y = Math.max(-2, Math.min(2, gy));
-            lastUpdate = performance.now();
-          } else {
-            // Keine Daten → nach 1s sanft auf Default
-            if (performance.now() - lastUpdate > 1000) {
-              engine.world.gravity.x = 0;
-              engine.world.gravity.y = 1;
+        penX += adv;
+      }
+      if (!letters.length) return;
+
+      const constraints = [];
+      for (let i = 0; i < letters.length - 1; i++) {
+        const A = letters[i], B = letters[i+1];
+        const dx = (B.position.x - A.position.x), dy = (B.position.y - A.position.y);
+        const len = Math.hypot(dx, dy);
+        const c = Constraint.create({
+          bodyA: A, bodyB: B,
+          length: Math.max(8, Math.min(24, len * 0.8)),
+          stiffness: 0.7,
+          damping: 0.02,
+          render: { visible: false }
+        });
+        constraints.push(c);
+      }
+
+      Composite.add(engine.world, letters);
+      Composite.add(engine.world, constraints);
+
+      const born = performance.now();
+      const rec = { letters, constraints, word, size, born };
+      words.push(rec);
+      setTimeout(() => {
+        for (const c of rec.constraints) Composite.remove(engine.world, c);
+        for (const b of rec.letters) Composite.remove(engine.world, b);
+        const idx = words.indexOf(rec);
+        if (idx >= 0) words.splice(idx, 1);
+      }, LETTER_TTL_MS);
+    };
+
+    // ---------- Web Speech: Push-to-Talk ----------
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    let isRecording = false;
+
+    function pointerIsOnMic(evt) {
+      if (!micBody) return false;
+      const rect = canvas.getBoundingClientRect();
+      const x = (evt.clientX - rect.left);
+      const y = (evt.clientY - rect.top);
+      const dx = x - micBody.position.x;
+      const dy = y - micBody.position.y;
+      return (dx*dx + dy*dy) <= (MIC_R*MIC_R);
+    }
+
+    function startRecording() {
+      if (!SR) { alert("Spracherkennung wird von diesem Browser nicht unterstützt."); return; }
+      if (isRecording) return;
+      recognition = new SR();
+      recognition.lang = "de-DE";
+      recognition.interimResults = false;
+      recognition.continuous = true;
+
+      recognition.onresult = (e) => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const res = e.results[i];
+          if (res.isFinal) {
+            const text = (res[0].transcript || "").trim();
+            if (text) {
+              // Ganze Worte spawnen
+              const wordsList = text.split(/\s+/);
+              for (const w of wordsList) spawnWord(w);
             }
           }
-        }, { passive: true });
-        gyroBtn.textContent = "Gyro aktiv";
-        gyroBtn.disabled = true;
-      } catch (e) {
-        console.error(e);
-        alert("Gyro konnte nicht aktiviert werden.");
+        }
+      };
+      recognition.onend = () => { isRecording = false; };
+      recognition.onerror = (ev) => { console.error(ev); isRecording = false; };
+
+      try { recognition.start(); isRecording = true; }
+      catch (e) { console.error(e); isRecording = false; }
+    }
+
+    function stopRecording() {
+      if (recognition) {
+        try { recognition.stop(); } catch {}
+        recognition = null;
+      }
+      isRecording = false;
+    }
+
+    // Pointer-Events auf dem Canvas (Press & Hold auf Mic-Kreis)
+    canvas.addEventListener('pointerdown', (e) => {
+      if (pointerIsOnMic(e)) {
+        e.preventDefault();
+        startRecording();
       }
     });
+    window.addEventListener('pointerup', (e) => {
+      if (isRecording) stopRecording();
+    });
+    window.addEventListener('pointercancel', () => { if (isRecording) stopRecording(); });
+    window.addEventListener('blur', () => { if (isRecording) stopRecording(); });
 
-    // Resize-Handling
-    function onResize() {
-      sizeCanvasToDisplaySize();
-      rebuildWalls();
-    }
-    window.addEventListener("resize", onResize);
-    onResize();
+    // ---------- Fertig ----------
   </script>
 </body>
 </html>
