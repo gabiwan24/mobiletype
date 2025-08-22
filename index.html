@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <title>Gyro Typo Playground</title>
   <style>
     html, body { margin:0; padding:0; height:100%; background:#fafafa; }
-    /* Wichtig: KEINE feste CSS-Größe am Canvas (wir setzen echte Pixelmaße per JS) */
-    canvas { display:block; }
+    canvas { display:block; } /* Größe setzen wir per JS exakt */
     #ui {
       position: fixed; left:0; right:0; bottom:0;
       display:flex; gap:8px; padding:10px;
@@ -18,6 +18,7 @@
     #input { flex:1; font-size:16px; padding:10px 12px; border-radius:12px; border:1px solid #ddd; }
     #gyroBtn { padding:10px 12px; border-radius:12px; border:1px solid #ddd; background:#fff; }
 
+    /* Deine Schrift – stelle sicher, dass die URL unten erreichbar ist */
     @font-face {
       font-family: "MontserratVar";
       src: url("fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
@@ -44,7 +45,7 @@
   <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
 
   <script>
-    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body, Common, Query, Bounds } = Matter;
+    const { Engine, Render, Runner, World, Bodies, Vertices, Events, Body, Common, Query, Bounds, Composite } = Matter;
 
     // poly-decomp an Matter binden
     if (window.decomp && Common && Common.setDecomp) {
@@ -56,40 +57,39 @@
     const input = document.getElementById("input");
     const gyroBtn = document.getElementById("gyroBtn");
 
-    // ——— DPI-korrektes Canvas Sizing ———
+    // DPI-korrektes Canvas
     function sizeCanvasToDisplaySize() {
       const dpr = window.devicePixelRatio || 1;
       const cssW = document.documentElement.clientWidth;
       const cssH = document.documentElement.clientHeight;
-      if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
-        canvas.width = Math.floor(cssW * dpr);
-        canvas.height = Math.floor(cssH * dpr);
+      const pxW = Math.floor(cssW * dpr), pxH = Math.floor(cssH * dpr);
+      if (canvas.width !== pxW || canvas.height !== pxH) {
+        canvas.width = pxW; canvas.height = pxH;
       }
-      // Matter-Render muss in CSS-PX wissen
       render.options.width = cssW;
       render.options.height = cssH;
       render.canvas.style.width = cssW + "px";
       render.canvas.style.height = cssH + "px";
     }
 
-    // ——— Engine & Render ———
+    // Engine & Render
     const engine = Engine.create();
-    engine.world.gravity.y = 1; // Basisgravitation (wird ggf. von Gyro überschrieben)
+    engine.world.gravity.y = 1; // Basisgravitation
     const render = Render.create({
       canvas,
       engine,
       options: {
-        width: 0, height: 0, // setzen wir gleich korrekt
+        width: 0, height: 0,
         wireframes: false,
         background: "#fafafa",
-        pixelRatio: 1 // wir skalieren selbst per dpr
+        pixelRatio: 1 // wir skalieren selbst
       }
     });
     sizeCanvasToDisplaySize();
     Render.run(render);
     Runner.run(Runner.create(), engine);
 
-    // ——— Wände (mit sicherem Innenrand) ———
+    // Wände
     let wallsComposite = null;
     const WALL_THICK = 50;
     function rebuildWalls() {
@@ -97,39 +97,53 @@
       const w = render.options.width, h = render.options.height, t = WALL_THICK;
       wallsComposite = Matter.Composite.create();
       Matter.Composite.add(wallsComposite, [
-        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }), // Boden
-        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),     // Decke
-        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),     // links
-        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })   // rechts
+        Bodies.rectangle(w/2, h + t/2, w, t, { isStatic: true }),
+        Bodies.rectangle(w/2, -t/2, w, t, { isStatic: true }),
+        Bodies.rectangle(-t/2, h/2, t, h, { isStatic: true }),
+        Bodies.rectangle(w + t/2, h/2, t, h, { isStatic: true })
       ]);
       World.add(engine.world, wallsComposite);
     }
     rebuildWalls();
 
-    // ——— Font laden (lokal) mit Fallback (für opentype) ———
-    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf";
-    const FALLBACK_TTF = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/montserrat/Montserrat-Regular.ttf";
-    let fontOT = null;      // opentype Font (Physik-Pfade)
-    let canvasFontReady = false; // Canvas-Font (sichtbar)
+    // Font laden (opentype für Physik + Canvas-Font für Sichtbarkeit)
+    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf"; // <- passe das an DEINEN Pfad an
+    const FALLBACK_TTF = ""; // optionaler zweiter TTF-Host (mit CORS), sonst leer lassen
 
-    function loadOTFont(url, cb){ opentype.load(url, (err, f) => cb(err, f)); }
-    loadOTFont(LOCAL_FONT_URL, (err, f) => {
-      if (!err && f) { fontOT = f; console.log("opentype Font geladen ✔️"); }
-      else {
-        console.warn("Lokaler opentype-Load fail, Fallback:", err);
-        loadOTFont(FALLBACK_TTF, (e2, f2) => {
-          if (!e2 && f2) { fontOT = f2; console.log("Fallback opentype Font geladen ✔️"); }
-          else console.error("Kein opentype Font verfügbar:", e2);
-        });
+    let fontOT = null;          // opentype Font
+    let canvasFontReady = false;
+
+    function loadOTFont(url) {
+      return new Promise((resolve, reject) => {
+        if (!url) return reject(new Error("No URL"));
+        opentype.load(url, (err, f) => err ? reject(err) : resolve(f));
+      });
+    }
+
+    (async () => {
+      try {
+        fontOT = await loadOTFont(LOCAL_FONT_URL);
+        console.log("opentype Font geladen ✔️");
+      } catch (e) {
+        console.warn("Lokaler opentype-Load fehlgeschlagen:", e);
+        if (FALLBACK_TTF) {
+          try {
+            fontOT = await loadOTFont(FALLBACK_TTF);
+            console.log("Fallback opentype Font geladen ✔️");
+          } catch (e2) {
+            console.error("Kein opentype Font verfügbar:", e2);
+          }
+        }
       }
-    });
-    // Canvas-Font laden (für sichtbares fillText)
-    Promise.all([
-      document.fonts.load('400 16px "MontserratVar"').catch(()=>{}),
-      document.fonts.ready.catch(()=>{})
-    ]).then(()=>{ canvasFontReady = true; });
+    })();
 
-    // ——— Kurven-Sampling + RDP-Simplify ———
+    (async () => {
+      try { await Promise.race([document.fonts.load('600 100px "MontserratVar"'), new Promise(r=>setTimeout(r,1500))]); } catch {}
+      try { await document.fonts.ready; } catch {}
+      canvasFontReady = true;
+    })();
+
+    // Kurven-Sampling & RDP-Simplify
     function quadAt(p0, p1, p2, t) {
       const x = (1-t)*(1-t)*p0.x + 2*(1-t)*t*p1.x + t*t*p2.x;
       const y = (1-t)*(1-t)*p0.y + 2*(1-t)*t*p1.y + t*t*p2.y;
@@ -147,8 +161,7 @@
       const lenSq = C*C + D*D || 1;
       let t = dot / lenSq; t = Math.max(0, Math.min(1, t));
       const x = a.x + t*C, y = a.y + t*D;
-      const dx = p.x - x, dy = p.y - y;
-      return Math.hypot(dx, dy);
+      return Math.hypot(p.x - x, p.y - y);
     }
     function rdp(points, epsilon) {
       if (points.length < 3) return points.slice();
@@ -164,6 +177,7 @@
       }
       return [points[0], points[points.length-1]];
     }
+
     function pathToPolygons(path) {
       const polys = [];
       let cur = [];
@@ -199,11 +213,7 @@
       return polys.map(poly => (poly.length > 3 ? rdp(poly, EPS) : poly));
     }
 
-    // ——— Buchstaben-Verwaltung ———
-    const letters = [];
-    const LETTER_TTL_MS = 30000;
-
-    // Hilfsfunktion: Bounding-Box der Polygone
+    // Spawn-Helfer
     function polygonsBounds(polys) {
       let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
       polys.forEach(poly => {
@@ -217,56 +227,57 @@
       return { min:{x:minX,y:minY}, max:{x:maxX,y:maxY}, width:maxX-minX, height:maxY-minY };
     }
 
-    // Prüfen, ob Spawnbereich frei ist (keine Wände / Bodies)
     function canSpawnAt(x, y, width, height) {
-      const margin = 6; // kleiner Puffer
-      const region = { min: { x: x - width/2 - margin, y: y - height/2 - margin },
-                       max: { x: x + width/2 + margin, y: y + height/2 + margin } };
-      // Alle Bodies in Region (inkl. Wände)
+      const margin = 6; // Puffer
+      const region = {
+        min: { x: x - width/2 - margin, y: y - height/2 - margin },
+        max: { x: x + width/2 + margin, y: y + height/2 + margin }
+      };
       const bodies = Composite.allBodies(engine.world);
       const hits = Query.region(bodies, region);
-      // Erlaube Spawn nur, wenn nichts außer Sensor-Bodies drin ist
-      return hits.length === 0;
+      // blockieren, wenn irgendein echter Körper (nicht Sensor) im Startbereich liegt
+      return !hits.some(b => !b.isSensor);
     }
 
-    function spawnLetter(char) {
-      if (!fontOT) return; // noch nicht geladen
-      // Schriftgröße
-      const size = 100;
+    const letters = [];
+    const LETTER_TTL_MS = 30000;
 
-      // Pfad + Polygone
+    function spawnLetter(char) {
+      if (!fontOT) return; // Font noch nicht bereit
+
+      const size = 100;
       const path = fontOT.getPath(char, 0, 0, size);
       const polys = pathToPolygons(path);
       if (!polys.length) return;
 
-      // BBox der Polys → sichere Spawn-Position bestimmen (zentriert + Innenrand)
+      // Zielposition: echte Mitte, aber so geklemmt, dass der Buchstabe komplett innerhalb der Wände bleibt
       const w = render.options.width, h = render.options.height;
       const bounds = polygonsBounds(polys);
       const safeInset = WALL_THICK + 8;
-      // Ziel: echte Bildmitte, aber clampen, so dass der Buchstabe vollständig innerhalb liegt
       let spawnX = Math.max(safeInset + bounds.width/2, Math.min(w - safeInset - bounds.width/2, w/2));
-      // Nicht hinter dem UI-Balken spawnen
       const uiH = ui.getBoundingClientRect().height || 0;
       let spawnY = Math.max(safeInset + bounds.height/2, Math.min(h - uiH - safeInset - bounds.height/2, h/2));
 
-      // Wenn der Bereich belegt ist (z. B. Buchstaben liegen da): NICHT spawnen
+      // Wenn Bereich belegt, NICHT spawnen (=> "nicht weiterschreiben")
       if (!canSpawnAt(spawnX, spawnY, bounds.width, bounds.height)) {
-        // Optional visuelles Feedback
         input.animate([{transform:'scale(1)'},{transform:'scale(0.98)'},{transform:'scale(1)'}], {duration:180});
         return;
       }
 
-      // Physik-Body aus Vertices (poly-decomp zerlegt)
-      const body = Bodies.fromVertices(spawnX, spawnY, polys, {
-        friction: 0.9,
-        frictionStatic: 1.0,
-        frictionAir: 0.01,
-        restitution: 0.12,
-        render: { fillStyle: "#00000000" }
-      }, true);
+      const body = Bodies.fromVertices(
+        spawnX, spawnY, polys,
+        {
+          friction: 0.9,
+          frictionStatic: 1.0,
+          frictionAir: 0.01,
+          restitution: 0.12,
+          render: { fillStyle: "#00000000" } // wir malen Text selbst
+        },
+        true
+      );
       if (!body) return;
 
-      // Masse ≈ Fläche (grobe Annäherung)
+      // Masse ≈ Fläche (grobe Annäherung über konvexe Hülle)
       try {
         const flat = polys.flat();
         const hull = Vertices.hull(flat);
@@ -286,15 +297,15 @@
       }, LETTER_TTL_MS);
     }
 
-    // ——— Eingabe (nur wenn Platz) ———
+    // Eingabe (einzelne Zeichen)
     input.addEventListener("beforeinput", (e) => {
       if (e.inputType === "insertText" && e.data) {
-        e.preventDefault(); // wir verwalten eigene Eingabe
+        e.preventDefault(); // wir verwalten das Spawnen
         spawnLetter(e.data[0]);
       }
     });
 
-    // ——— Rendering (nur wenn Canvas-Font geladen) ———
+    // Sichtbares Text-Rendering (Canvas)
     Events.on(render, "afterRender", () => {
       if (!canvasFontReady) return;
       const ctx = render.context;
@@ -318,7 +329,7 @@
       ctx.restore();
     });
 
-    // ——— Gyro: Desktop-Fallback sicher ———
+    // Gyro mit Desktop-Fallback (nur echte Sensorwerte verwenden)
     let gyroActive = false;
     gyroBtn.addEventListener("click", async () => {
       try {
@@ -330,8 +341,8 @@
         gyroActive = true;
         let lastUpdate = performance.now();
         window.addEventListener("deviceorientation", (ev) => {
-          // Desktop liefert oft null → dann NICHT auf 0 setzen, sondern Basisgravitation beibehalten
-          const hasData = (typeof ev.beta === "number" && !isNaN(ev.beta)) || (typeof ev.gamma === "number" && !isNaN(ev.gamma));
+          const hasData = (typeof ev.beta === "number" && !isNaN(ev.beta)) ||
+                          (typeof ev.gamma === "number" && !isNaN(ev.gamma));
           if (hasData) {
             const gx = (ev.gamma || 0) / 18;
             const gy = (ev.beta  || 0) / 18;
@@ -339,7 +350,7 @@
             engine.world.gravity.y = Math.max(-2, Math.min(2, gy));
             lastUpdate = performance.now();
           } else {
-            // Wenn 1s lang keine Sensorwerte: sanft zur Standardgravitation zurück
+            // Keine Daten → nach 1s sanft auf Default
             if (performance.now() - lastUpdate > 1000) {
               engine.world.gravity.x = 0;
               engine.world.gravity.y = 1;
@@ -354,7 +365,7 @@
       }
     });
 
-    // ——— Resize-Handling ———
+    // Resize-Handling
     function onResize() {
       sizeCanvasToDisplaySize();
       rebuildWalls();
