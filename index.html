@@ -7,7 +7,8 @@
   <title>Gyro Typo – Voice</title>
   <style>
     html, body { margin:0; padding:0; height:100%; background:#fafafa; }
-    canvas { display:block; }
+    /* wichtig: kein CSS-Resize-Scaling; wir nutzen CSS-Pixel 1:1 */
+    canvas { display:block; touch-action: none; }
 
     /* Lokale Schrift – passe den Pfad an dein Repo an! */
     @font-face {
@@ -40,29 +41,28 @@
       Common.setDecomp(window.decomp);
     }
 
-    // ---------- Canvas/Engine ----------
+    // ---------- Canvas/Engine (CSS-Pixel 1:1) ----------
     const canvas = document.getElementById("world");
     const engine = Engine.create();
-    engine.world.gravity.y = 1; // Basisgravitation; Physik immer aktiv
+    engine.world.gravity.y = 1; // Physik immer an
 
     const render = Render.create({
       canvas,
       engine,
       options: {
-        width: 0, height: 0, // setzen wir gleich
+        width: 0, height: 0,        // setzen wir gleich
         wireframes: false,
         background: "#fafafa",
-        pixelRatio: 1
+        pixelRatio: 1                // KEIN DPR-Scaling -> stabiles Hit-Testing
       }
     });
 
     function sizeCanvasToDisplaySize() {
-      const dpr = window.devicePixelRatio || 1;
       const cssW = document.documentElement.clientWidth;
       const cssH = document.documentElement.clientHeight;
-      const pxW = Math.floor(cssW * dpr), pxH = Math.floor(cssH * dpr);
-      if (canvas.width !== pxW || canvas.height !== pxH) {
-        canvas.width = pxW; canvas.height = pxH;
+      if (canvas.width !== cssW || canvas.height !== cssH) {
+        canvas.width = cssW;
+        canvas.height = cssH;
       }
       render.options.width = cssW;
       render.options.height = cssH;
@@ -91,18 +91,18 @@
     }
 
     // ---------- Mic-Button als physischer Collider ----------
-    const MIC_R = 36; // px
+    const MIC_R = 120; // Radius -> Ø 240px (>= 200px)
     let micBody = null;
     function placeMic() {
       if (micBody) World.remove(engine.world, micBody);
       const w = render.options.width, h = render.options.height;
-      const y = h - MIC_R - 14; // etwas Abstand vom unteren Rand
+      const y = h - MIC_R - 20; // etwas Abstand vom unteren Rand
       micBody = Bodies.circle(w/2, y, MIC_R, {
         isStatic: true,
         restitution: 0.2,
         friction: 0.9,
         frictionStatic: 1.0,
-        render: { fillStyle: "transparent" } // wir malen selbst
+        render: { fillStyle: "transparent" } // wir malen den Kreis selbst (schwarz)
       });
       World.add(engine.world, micBody);
     }
@@ -139,7 +139,7 @@
     (async () => {
       try {
         await Promise.race([
-          document.fonts.load('600 100px "MontserratVar"'),
+          document.fonts.load('700 100px "MontserratVar"'),
           new Promise(r=>setTimeout(r, 1500))
         ]);
       } catch {}
@@ -235,8 +235,7 @@
     function canSpawnRegion(region) {
       const bodies = Composite.allBodies(engine.world);
       const hits = Query.region(bodies, region);
-      // Wenn der Bereich frei von echten (nicht Sensor) Bodies ist → OK
-      return !hits.some(b => !b.isSensor);
+      return !hits.some(b => !b.isSensor); // frei, wenn keine echten Bodies dort liegen
     }
     function spawnWord(word) {
       if (!fontOT) return;
@@ -244,187 +243,23 @@
       if (!word) return;
 
       const size = 84;              // Wort-Schriftgröße
-      const gapTighten = -2;        // leichte Negativlaufweite (optisch kompakt)
-      const { glyphs, width, scale } = measureWord(word, size);
-      // Spawn-Ziel: Mitte clamped an Wände
-      const w = render.options.width, h = render.options.height;
-      const safeInset = WALL_THICK + 8;
-      let spawnX = Math.max(safeInset + width/2, Math.min(w - safeInset - width/2, w/2));
-      let spawnY = Math.max(safeInset + size/2, Math.min(h - safeInset - size/2 - (MIC_R+24), h/2));
-      // Region-Check (breite Rechteck-Approx des Wortes)
-      const region = {
-        min: { x: spawnX - width/2 - 6, y: spawnY - size/1.4 - 6 },
-        max: { x: spawnX + width/2 + 6, y: spawnY + size/1.8 + 6 }
-      };
-      if (!canSpawnRegion(region)) {
-        // kein Platz → nicht weiterschreiben
-        return;
-      }
-
-      // Für jedes Zeichen: Pfad → Polys → Body (mit Offsets)
-      const letters = [];
-      let penX = -width/2; // beginnen links, so dass die Wortmitte bei spawnX liegt
-      for (let i = 0; i < glyphs.length; i++) {
-        const g = glyphs[i];
-        const path = g.getPath(0, 0, size);
-        const polys = pathToPolygons(path);
-        if (!polys.length) {
-          // trotzdem Pen weiter
-          const adv = (g.advanceWidth * scale) + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0) + gapTighten;
-          penX += adv;
-          continue;
-        }
-        // Body aus Vertices, an (spawnX + penX + shift, spawnY)
-        const localShiftX = 0; // Glyphenpfad startet meist bei 0
-        const shiftedPolys = polys.map(poly => poly.map(p => ({ x: p.x + penX + localShiftX, y: p.y })));
-        const body = Bodies.fromVertices(spawnX, spawnY, shiftedPolys, {
-          friction: 0.9, frictionStatic: 1.0, frictionAir: 0.01, restitution: 0.12,
-          render: { fillStyle: "#00000000" }
-        }, true);
-        if (body) {
-          letters.push(body);
-        }
-        // Pen vorrücken
-        const adv = (g.advanceWidth * scale) + (i<glyphs.length-1 ? fontOT.getKerningValue(g, glyphs[i+1]) * scale : 0) + gapTighten;
-        penX += adv;
-      }
-      if (!letters.length) return;
-
-      // Verbinden: Constraints zwischen benachbarten Buchstaben (Sollbruchstellen)
-      const constraints = [];
-      for (let i = 0; i < letters.length - 1; i++) {
-        const A = letters[i], B = letters[i+1];
-        const dx = (B.position.x - A.position.x), dy = (B.position.y - A.position.y);
-        const len = Math.hypot(dx, dy);
-        const c = Constraint.create({
-          bodyA: A, bodyB: B,
-          pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 },
-          length: Math.max(8, Math.min(24, len * 0.8)),
-          stiffness: 0.7,
-          damping: 0.02,
-          render: { visible: false }
-        });
-        constraints.push(c);
-      }
-
-      // Gruppe in die Welt
-      Composite.add(engine.world, letters);
-      Composite.add(engine.world, constraints);
-
-      // Auto-Remove nach 30s
-      const born = performance.now();
-      const rec = { letters, constraints, word, size, born };
-      words.push(rec);
-      setTimeout(() => {
-        // entfernen
-        for (const c of rec.constraints) Composite.remove(engine.world, c);
-        for (const b of rec.letters) Composite.remove(engine.world, b);
-        const idx = words.indexOf(rec);
-        if (idx >= 0) words.splice(idx, 1);
-      }, LETTER_TTL_MS);
-    }
-
-    // Constraint-Bruch (reißende Worte)
-    Events.on(engine, "afterUpdate", () => {
-      for (const rec of words) {
-        for (let i = rec.constraints.length - 1; i >= 0; i--) {
-          const c = rec.constraints[i];
-          if (!c.bodyA || !c.bodyB) continue;
-          const ax = c.bodyA.position.x + (c.pointA?.x || 0);
-          const ay = c.bodyA.position.y + (c.pointA?.y || 0);
-          const bx = c.bodyB.position.x + (c.pointB?.x || 0);
-          const by = c.bodyB.position.y + (c.pointB?.y || 0);
-          const dist = Math.hypot(bx - ax, by - ay);
-          const breakLen = (c.length || 12) * 1.6; // wie viel Dehnung erlaubt
-          if (dist > breakLen) {
-            Composite.remove(engine.world, c);
-            rec.constraints.splice(i, 1);
-          }
-        }
-      }
-    });
-
-    // ---------- Rendering: Worte + Mic-Button ----------
-    Events.on(render, "afterRender", () => {
-      if (!canvasFontReady) return;
-      const ctx = render.context;
-      ctx.save();
-      ctx.textAlign = "center";
-      ctx.textBaseline = "alphabetic"; // bessere optische Lage
-      ctx.shadowColor = "rgba(0,0,0,0.25)";
-      ctx.shadowBlur = 6;
-      ctx.shadowOffsetY = 1;
-
-      // alle Buchstaben aller Wörter zeichnen
-      for (const rec of words) {
-        for (const body of rec.letters) {
-          const { x, y } = body.position;
-          ctx.translate(x, y);
-          ctx.rotate(body.angle);
-          ctx.font = `700 ${rec.size}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
-          ctx.fillStyle = "#222";
-          // Body repräsentiert einen Buchstaben – wir brauchen das tatsächliche Zeichen nicht einzeln;
-          // Stattdessen nutzen wir den ursprünglichen Pfad-Zeichen-Offset:
-          // Einfachheitshalber zeichnen wir den nächsten bestpassenden Text über die Poly-Position:
-          // Für saubere Buchstaben-zu-Body-Mapping müssten wir pro Body das Zeichen merken;
-          // Hier speichern wir es pragmatisch im Label:
-          const ch = body.label && body.label.startsWith("char:") ? body.label.slice(5) : null;
-          if (ch) ctx.fillText(ch, 0, rec.size * 0.35);
-          ctx.rotate(-body.angle);
-          ctx.translate(-x, -y);
-        }
-      }
-
-      // Mic-Button zeichnen (über der Szene)
-      if (micBody) {
-        const { x, y } = micBody.position;
-        ctx.translate(x, y);
-        // Kreis
-        ctx.beginPath();
-        ctx.arc(0, 0, MIC_R, 0, Math.PI*2);
-        ctx.closePath();
-        ctx.fillStyle = isRecording ? "#e74c3c" : "#ffffff";
-        ctx.fill();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = "rgba(0,0,0,0.2)";
-        ctx.stroke();
-        // Icon
-        ctx.font = `bold ${MIC_R}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-        ctx.fillStyle = isRecording ? "#fff" : "#333";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("🎤", 0, 1);
-        ctx.translate(-x, -y);
-      }
-
-      ctx.restore();
-    });
-
-    // Damit im Rendering der richtige Buchstabe auftaucht, überschreiben wir spawnWord leicht:
-    // Wir setzen 'label' = 'char:<zeichen>' beim Erzeugen des Bodies.
-    const _spawnWord = spawnWord;
-    spawnWord = function(word) {
-      if (!fontOT) return;
-      word = word.trim();
-      if (!word) return;
-
-      const size = 84;
-      const gapTighten = -2;
+      const gapTighten = -2;        // kompakter
       const { glyphs, width, scale } = measureWord(word, size);
 
       const w = render.options.width, h = render.options.height;
       const safeInset = WALL_THICK + 8;
       let spawnX = Math.max(safeInset + width/2, Math.min(w - safeInset - width/2, w/2));
       let spawnY = Math.max(safeInset + size/2, Math.min(h - safeInset - size/2 - (MIC_R+24), h/2));
+
       const region = {
         min: { x: spawnX - width/2 - 6, y: spawnY - size/1.4 - 6 },
         max: { x: spawnX + width/2 + 6, y: spawnY + size/1.8 + 6 }
       };
-      if (!canSpawnRegion(region)) return;
+      if (!canSpawnRegion(region)) return; // kein Platz → nicht spawnen
 
       const letters = [];
       let penX = -width/2;
-      let textChars = Array.from(word);
+      const textChars = Array.from(word);
       let charIndex = 0;
 
       for (let i = 0; i < glyphs.length; i++) {
@@ -440,7 +275,6 @@
             render: { fillStyle: "#00000000" }
           }, true);
           if (body) {
-            // Vermute das sichtbare Zeichen (fallback auf Leerzeichen)
             const ch = textChars[charIndex] || " ";
             body.label = "char:" + ch;
             letters.push(body);
@@ -478,7 +312,72 @@
         const idx = words.indexOf(rec);
         if (idx >= 0) words.splice(idx, 1);
       }, LETTER_TTL_MS);
-    };
+    }
+
+    // Constraint-Bruch (reißende Worte)
+    Events.on(engine, "afterUpdate", () => {
+      for (const rec of words) {
+        for (let i = rec.constraints.length - 1; i >= 0; i--) {
+          const c = rec.constraints[i];
+          if (!c.bodyA || !c.bodyB) continue;
+          const ax = c.bodyA.position.x, ay = c.bodyA.position.y;
+          const bx = c.bodyB.position.x, by = c.bodyB.position.y;
+          const dist = Math.hypot(bx - ax, by - ay);
+          const breakLen = (c.length || 12) * 1.6; // Dehnungstoleranz
+          if (dist > breakLen) {
+            Composite.remove(engine.world, c);
+            rec.constraints.splice(i, 1);
+          }
+        }
+      }
+    });
+
+    // ---------- Rendering: Worte + Mic-Button ----------
+    Events.on(render, "afterRender", () => {
+      if (!canvasFontReady) return;
+      const ctx = render.context;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.shadowColor = "rgba(0,0,0,0.25)";
+      ctx.shadowBlur = 6;
+      ctx.shadowOffsetY = 1;
+
+      // Buchstaben
+      for (const rec of words) {
+        for (const body of rec.letters) {
+          const { x, y } = body.position;
+          ctx.translate(x, y);
+          ctx.rotate(body.angle);
+          ctx.font = `700 ${rec.size}px "MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
+          ctx.fillStyle = "#222";
+          const ch = body.label && body.label.startsWith("char:") ? body.label.slice(5) : null;
+          if (ch) ctx.fillText(ch, 0, rec.size * 0.35);
+          ctx.rotate(-body.angle);
+          ctx.translate(-x, -y);
+        }
+      }
+
+      // Mic-Button (schwarz, Ø >= 200px)
+      if (micBody) {
+        const { x, y } = micBody.position;
+        ctx.translate(x, y);
+        ctx.beginPath();
+        ctx.arc(0, 0, MIC_R, 0, Math.PI*2);
+        ctx.closePath();
+        ctx.fillStyle = "#000";     // SCHWARZ
+        ctx.fill();
+        // Icon invertiert
+        ctx.font = `bold ${MIC_R}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("🎤", 0, 4);
+        ctx.translate(-x, -y);
+      }
+
+      ctx.restore();
+    });
 
     // ---------- Web Speech: Push-to-Talk ----------
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -488,8 +387,8 @@
     function pointerIsOnMic(evt) {
       if (!micBody) return false;
       const rect = canvas.getBoundingClientRect();
-      const x = (evt.clientX - rect.left);
-      const y = (evt.clientY - rect.top);
+      const x = (evt.clientX ?? (evt.touches && evt.touches[0]?.clientX)) - rect.left;
+      const y = (evt.clientY ?? (evt.touches && evt.touches[0]?.clientY)) - rect.top;
       const dx = x - micBody.position.x;
       const dy = y - micBody.position.y;
       return (dx*dx + dy*dy) <= (MIC_R*MIC_R);
@@ -509,7 +408,6 @@
           if (res.isFinal) {
             const text = (res[0].transcript || "").trim();
             if (text) {
-              // Ganze Worte spawnen
               const wordsList = text.split(/\s+/);
               for (const w of wordsList) spawnWord(w);
             }
@@ -531,17 +429,22 @@
       isRecording = false;
     }
 
-    // Pointer-Events auf dem Canvas (Press & Hold auf Mic-Kreis)
+    // Press & Hold direkt auf dem Canvas-Kreis
     canvas.addEventListener('pointerdown', (e) => {
       if (pointerIsOnMic(e)) {
         e.preventDefault();
+        e.stopPropagation();
+        canvas.setPointerCapture?.(e.pointerId);
         startRecording();
       }
     });
-    window.addEventListener('pointerup', (e) => {
-      if (isRecording) stopRecording();
+    canvas.addEventListener('pointerup', (e) => {
+      if (isRecording) {
+        e.preventDefault();
+        stopRecording();
+      }
     });
-    window.addEventListener('pointercancel', () => { if (isRecording) stopRecording(); });
+    canvas.addEventListener('pointercancel', () => { if (isRecording) stopRecording(); });
     window.addEventListener('blur', () => { if (isRecording) stopRecording(); });
 
     // ---------- Fertig ----------
