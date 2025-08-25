@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Typo Voice Physics – Stable</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; background:#fafafa; }
+    canvas { display:block; touch-action:none; }
+
+    @font-face {
+      font-family: "MontserratVar";
+      src: url("fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
+      font-weight: 100 900;
+      font-style: normal;
+      font-display: swap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="world"></canvas>
+
+  <!-- Matter.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <!-- opentype.js (nur zum Messen/Kerning, nicht für Physik) -->
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
+
+  <script>
+    const {
+      Engine, Render, Runner, World, Bodies, Body, Composite,
+      Common, Events
+    } = Matter;
+
+    // ---------- Konstanten & Zustände ----------
+    const WALL_THICK = 60;
+    let walls = null;
+    const MIC_R = 120;    // Button-Radius (Ø 240)
+    let micBody = null;
+
+    // Engine / Render (CSS-Pixel 1:1)
+    const canvas = document.getElementById('world');
+    const engine = Engine.create({ enableSleeping: true });
+    // Ruhige Physik
+    engine.positionIterations = 10;
+    engine.velocityIterations = 10;
+    engine.constraintIterations = 2;
+    engine.world.gravity.y = 1;
+
+    const render = Render.create({
+      canvas, engine,
+      options: { width: 0, height: 0, wireframes: false, background: "#fafafa", pixelRatio: 1 }
+    });
+
+    function resize() {
+      const w = document.documentElement.clientWidth;
+      const h = document.documentElement.clientHeight;
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      render.options.width = w; render.options.height = h;
+      render.canvas.style.width = w + "px"; render.canvas.style.height = h + "px";
+      buildWalls();
+      placeMic();
+    }
+    window.addEventListener('resize', resize);
+    Render.run(render);
+    Runner.run(Runner.create(), engine);
+    resize();
+
+    // Unsichtbare Ränder
+    function buildWalls() {
+      if (walls) World.remove(engine.world, walls);
+      const w = render.options.width, h = render.options.height, t = WALL_THICK;
+      walls = Composite.create();
+      const stat = { isStatic: true, friction: 1, restitution: 0.02, render: { visible: false } };
+      Composite.add(walls, [
+        Bodies.rectangle(w/2, h + t/2, w, t, stat),
+        Bodies.rectangle(w/2, -t/2, w, t, stat),
+        Bodies.rectangle(-t/2, h/2, t, h, stat),
+        Bodies.rectangle(w + t/2, h/2, t, h, stat)
+      ]);
+      World.add(engine.world, walls);
+    }
+
+    // Aufnahme-Button (schwarzer Kreis, Collider)
+    function placeMic() {
+      if (micBody) World.remove(engine.world, micBody);
+      const w = render.options.width, h = render.options.height;
+      micBody = Bodies.circle(w/2, h - MIC_R - 20, MIC_R, {
+        isStatic: true, friction: 1, frictionStatic: 1, restitution: 0.02, render: { visible: false }
+      });
+      World.add(engine.world, micBody);
+    }
+
+    // ---------- Font laden ----------
+    const LOCAL_FONT_URL = "fonts/Montserrat-VariableFont_wght.ttf"; // <- anpassen
+    let fontOT = null;
+    let canvasFontReady = false;
+
+    function loadOTFont(url){ return new Promise((res,rej)=>opentype.load(url,(e,f)=>e?rej(e):res(f))); }
+    (async()=>{ try{ fontOT = await loadOTFont(LOCAL_FONT_URL); } catch(e){ console.error("Font load fail:", e); } })();
+    (async()=>{ try{ await Promise.race([document.fonts.load('700 120px "MontserratVar"'), new Promise(r=>setTimeout(r,1200))]); }catch{} try{ await document.fonts.ready; }catch{} canvasFontReady = true; })();
+
+    // ---------- Hilfen: Wort-Messung mit Kerning ----------
+    function measureWord(word, size) {
+      if (!fontOT) return { glyphs: [], width: 0, scale: 1 };
+      const scale = size / fontOT.unitsPerEm;
+      const glyphs = fontOT.stringToGlyphs(word);
+      let width = 0;
+      for (let i = 0; i < glyphs.length; i++) {
+        const g = glyphs[i];
+        width += g.advanceWidth * scale;
+        if (i < glyphs.length - 1) width += fontOT.getKerningValue(g, glyphs[i+1]) * scale;
+      }
+      return { glyphs, width, scale };
+    }
+
+    // ---------- Audio (Lautstärke → Gewicht) ----------
+    let isRecording = false;
+    let currentLine = "";            // live Zeile
+    let currentWght = 400;           // 100..800 (live)
+    let sumRMS = 0, samplesRMS = 0;  // Durchschnitt pro Press
+    let audioCtx=null, analyser=null, mediaStream=null;
+
+    function startAudioMeter() {
+      return navigator.mediaDevices.getUserMedia({ audio: true }).then(stream=>{
+        mediaStream = stream;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
+        src.connect(analyser);
+        tickVolume();
+      });
+    }
+    function stopAudioMeter() {
+      if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+      if (audioCtx) { audioCtx.close().catch(()=>{}); audioCtx=null; }
+      analyser = null;
+    }
+    function tickVolume() {
+      if (!analyser) return;
+      const buf = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0; for (let i=0;i<buf.length;i++){ const v=buf[i]; sum += v*v; }
+      const rms = Math.sqrt(sum / buf.length);       // ~0..1
+      sumRMS += rms; samplesRMS++;
+      const v = Math.min(1, rms * 8);
+      currentWght = Math.round(100 + (800-100) * v);
+      requestAnimationFrame(tickVolume);
+    }
+    function averagedWght() {
+      const avg = samplesRMS ? (sumRMS / samplesRMS) : 0;
+      const v = Math.min(1, avg * 8);
+      return Math.round(100 + (800-100) * v);
+    }
+
+    // ---------- SpeechRecognition + Gyro ----------
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+
+    let gyroInited = false;
+    function initGyroOnce() {
+      if (gyroInited) return; gyroInited = true;
+      if (typeof DeviceOrientationEvent !== "undefined" &&
+          typeof DeviceOrientationEvent.requestPermission === "function") {
+        DeviceOrientationEvent.requestPermission().catch(()=>{}).finally(attachGyro);
+      } else attachGyro();
+    }
+    function attachGyro() {
+      window.addEventListener("deviceorientation", (ev) => {
+        const gx = (typeof ev.gamma === "number") ? ev.gamma/18 : 0;
+        const gy = (typeof ev.beta  === "number") ? ev.beta/18  : 1;
+        engine.world.gravity.x = Math.max(-2, Math.min(2, gx));
+        engine.world.gravity.y = Math.max(-2, Math.min(2, gy));
+      }, { passive: true });
+    }
+
+    function startSpeech() {
+      if (!SR) { alert("Spracherkennung wird nicht unterstützt."); return; }
+      if (isRecording) return;
+      initGyroOnce();
+
+      recognition = new SR();
+      recognition.lang = "de-DE";
+      recognition.interimResults = true;
+      recognition.continuous = true;
+
+      currentLine = ""; sumRMS = 0; samplesRMS = 0; currentWght = 400;
+
+      recognition.onresult = (e) => {
+        let finalText = "";
+        for (let i=e.resultIndex; i<e.results.length; i++){
+          const res = e.results[i];
+          if (res.isFinal) finalText += res[0].transcript;
+          else currentLine = res[0].transcript;
+        }
+        if (finalText.trim()) currentLine = finalText.trim();
+      };
+      recognition.onend   = () => { isRecording = false; finalizePress(); };
+      recognition.onerror = () => { isRecording = false; finalizePress(); };
+
+      startAudioMeter().then(()=>{
+        try { recognition.start(); isRecording = true; } catch(e){ console.error(e); isRecording=false; }
+      }).catch(err=> console.error(err));
+    }
+    function stopSpeech() {
+      try { recognition && recognition.stop(); } catch{}
+      stopAudioMeter();
+    }
+
+    // ---------- Fallen lassen: Buchstaben als einfache Rechtecke (stabil!) ----------
+    const LETTER_TTL_MS = 30000;
+    const letterGroups = []; // [{letters:[{body,char,size,wght}]}]
+
+    function spawnFallingWord(word, size, wght) {
+      if (!fontOT) return;
+      word = word.trim(); if (!word) return;
+
+      const { glyphs, width, scale } = measureWord(word, size);
+      const w = render.options.width, h = render.options.height;
+      const inset = WALL_THICK + 8;
+      const spawnX = Math.max(inset + width/2, Math.min(w - inset - width/2, w/2));
+      const spawnY = Math.max(inset + size/2, Math.min(h - inset - size/2 - (MIC_R + 24), h/2));
+
+      const letters = [];
+      let penX = -width/2;
+      const chars = Array.from(word);
+      const EXTRA_SPACING = 2; // verhindert Start-Überlappungen
+
+      for (let i=0; i<glyphs.length; i++) {
+        const g = glyphs[i];
+        // Glyph-Bounds (in Font-Einheiten)
+        const gb = g.getBoundingBox ? g.getBoundingBox() : { x1:0, y1:-size*0.8/scale, x2:g.advanceWidth, y2:size*0.2/scale };
+        const bw = Math.max(6, (gb.x2 - gb.x1) * scale);
+        const bh = Math.max(8, (gb.y2 - gb.y1) * scale);
+
+        // Rechteck-Kollider – Mitte des Rechtecks auf Text-Baseline
+        const cx = spawnX + penX + (gb.x1 * scale) + bw/2;
+        const cy = spawnY - (gb.y2 * scale) + bh/2; // y nach unten positiv
+
+        const body = Bodies.rectangle(cx, cy, bw, bh, {
+          friction: 0.2,
+          frictionStatic: 0.05,
+          frictionAir: 0.03,
+          restitution: 0.18,   // leicht abstoßend
+          render: { visible: false },
+          sleepThreshold: 40
+        });
+        // Unterschiedliche Startrotation & Masse
+        Body.setAngularVelocity(body, (Math.random()*2-1) * 0.35);
+        const area = bw * bh;
+        const rand = 0.85 + Math.random()*0.5;
+        Body.setMass(body, Math.max(1, (area/2200) * rand));
+
+        const ch = chars[i] || " ";
+        body.label = "char:" + ch;
+
+        Composite.add(engine.world, body);
+        letters.push({ body, char: ch, size, wght });
+
+        // Vorschub inkl. Kerning + Zusatzabstand
+        let adv = (g.advanceWidth * scale);
+        if (i < glyphs.length - 1) adv += fontOT.getKerningValue(g, glyphs[i+1]) * scale;
+        adv += EXTRA_SPACING;
+        penX += adv;
+      }
+
+      const group = { letters };
+      letterGroups.push(group);
+      setTimeout(()=>{
+        for (const L of group.letters) Composite.remove(engine.world, L.body);
+        const idx = letterGroups.indexOf(group); if (idx>=0) letterGroups.splice(idx,1);
+      }, LETTER_TTL_MS);
+    }
+
+    function finalizePress() {
+      const line = (currentLine || "").trim();
+      currentLine = "";
+      const size = 100;
+      const wght = averagedWght();  // Gewicht = Durchschnittslautstärke dieser Aufnahme
+      stopAudioMeter();
+      if (!line) return;
+      line.split(/\s+/).forEach(w => spawnFallingWord(w, size, wght));
+    }
+
+    // ---------- Rendering ----------
+    Events.on(render, "afterRender", () => {
+      const ctx = render.context;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+
+      // Live-Zeile (immer anzeigen; wenn Font nicht ready: System-Font)
+      if (isRecording || currentLine) {
+        const w = render.options.width, h = render.options.height;
+        const inset = WALL_THICK + 8;
+        const fontSize = 120;
+        const fam = canvasFontReady ? '"MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial'
+                                    : 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.font = `${currentWght} ${fontSize}px ${fam}`;
+        const text = currentLine || "";
+        const tw = ctx.measureText(text).width;
+        const x = Math.max(inset + tw/2, Math.min(w - inset - tw/2, w/2));
+        const y = Math.max(inset + fontSize, Math.min(h - inset - (MIC_R + 24), h/2));
+        ctx.fillStyle = "#222";
+        ctx.shadowColor = "rgba(0,0,0,0.20)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
+        ctx.fillText(text, x, y);
+      }
+
+      // Gefallene Buchstaben (zeichnen echte Glyphen an Body-Pos)
+      {
+        const fam = canvasFontReady ? '"MontserratVar", system-ui, -apple-system, Segoe UI, Roboto, Arial'
+                                    : 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.shadowColor = "rgba(0,0,0,0.20)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
+
+        for (const group of letterGroups) {
+          for (const L of group.letters) {
+            const { body, char, size, wght } = L;
+            const { x, y } = body.position;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(body.angle);
+            ctx.font = `${wght} ${size}px ${fam}`;
+            ctx.fillStyle = "#222";
+            // alphabetic baseline: leichte optische Korrektur
+            ctx.fillText(char, 0, size*0.35);
+            ctx.restore();
+          }
+        }
+      }
+
+      // Mic-Button: schwarzer Kreis (ohne Icon)
+      if (micBody) {
+        const { x, y } = micBody.position;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.beginPath(); ctx.arc(0, 0, MIC_R, 0, Math.PI*2); ctx.closePath();
+        ctx.fillStyle = "#000"; ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.restore();
+    });
+
+    // ---------- Pointer: Press & Hold auf Kreis ----------
+    function hitMic(evt) {
+      if (!micBody) return false;
+      const rect = canvas.getBoundingClientRect();
+      const cx = (evt.clientX ?? (evt.touches && evt.touches[0]?.clientX)) - rect.left;
+      const cy = (evt.clientY ?? (evt.touches && evt.touches[0]?.clientY)) - rect.top;
+      const dx = cx - micBody.position.x, dy = cy - micBody.position.y;
+      return (dx*dx + dy*dy) <= (MIC_R*MIC_R);
+    }
+    canvas.addEventListener('pointerdown', (e)=>{
+      if (hitMic(e)) {
+        e.preventDefault(); canvas.setPointerCapture?.(e.pointerId);
+        startSpeech();
+      }
+    });
+    canvas.addEventListener('pointerup', (e)=>{
+      if (isRecording) { e.preventDefault(); stopSpeech(); }
+    });
+    canvas.addEventListener('pointercancel', ()=> { if (isRecording) stopSpeech(); });
+    window.addEventListener('blur', ()=> { if (isRecording) stopSpeech(); });
+  </script>
+</body>
+</html>
